@@ -592,6 +592,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
     public Set<String> getFetchingSkins() { return fetchingSkins; }
     public Map<String, UUID> getNameToUuidIndex() { return nameToUuidIndex; }
     public boolean isVirtualPlayer(UUID uuid) { return virtualPlayerUUIDs.contains(uuid); }
+    public String getVirtualPlayerName(UUID uuid) { return virtualPlayerNames.get(uuid); }
 
 
     private void processRespawnQueue() {

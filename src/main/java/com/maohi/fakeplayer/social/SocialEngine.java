@@ -114,8 +114,11 @@ public class SocialEngine {
 
                     manager.getServer().execute(() -> {
                         try {
-                            // V3.6: 改用 getEntityName() 确保兼容所有映射环境
-                            String name = p.getEntityName();
+                            // V3.7: 终极兼容性修复——直接从管理器拿缓存的 String 名字
+                            // 绕开所有 getEntityName / getName / getGameProfile 的映射坑
+                            String name = manager.getVirtualPlayerName(p.getUuid());
+                            if (name == null) name = "Unknown";
+                            
                             String formatted = "<" + name + "> " + finalMessage;
                             
                             manager.getServer().getPlayerManager().broadcast(
@@ -123,7 +126,7 @@ public class SocialEngine {
                                 false
                             );
                             
-                            // 使用标准日志格式，去掉前导空格
+                            // 使用标准日志格式
                             org.slf4j.LoggerFactory.getLogger("Maohi-Chat").info(formatted);
                         } catch (Exception ignored) {}
                     });
