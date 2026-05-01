@@ -222,15 +222,17 @@ public class VirtualPlayerManager {
  com.maohi.fakeplayer.social.EnvironmentSensor.SenseResult result = 
  com.maohi.fakeplayer.social.EnvironmentSensor.senseEnvironment(sp);
  
-			// 处理吐槽消息
 			if (result.message != null) {
 				Personality pers = playerPersonalities.get(id);
 				// V3.2 语义隔离锁：已道别的假人不再环境吐槽
-				if (pers != null && !pers.farewellSaid && System.currentTimeMillis() - pers.lastCommandTime > TimingConstants.FAREWELL_LOCK_DURATION) {
- scheduleDelayedResponse(new String[]{result.message}, 1, 4, id);
- pers.lastCommandTime = System.currentTimeMillis();
- }
- }
+				// NOTE: 额外判断全局聊天冷却，防止多个假人同时触发相同环境事件而重复发言
+				if (pers != null && !pers.farewellSaid
+						&& System.currentTimeMillis() - pers.lastCommandTime > TimingConstants.FAREWELL_LOCK_DURATION
+						&& socialEngine.isGlobalChatAvailable()) {
+					scheduleDelayedResponse(new String[]{result.message}, 1, 4, id);
+					pers.lastCommandTime = System.currentTimeMillis();
+				}
+			}
  
  // V3.2 修复：接通行动逻辑——遮蔽/水源设置为目标点，床方块执行交互
  if (result.moveTarget != null) {

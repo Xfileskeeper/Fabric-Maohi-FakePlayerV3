@@ -83,6 +83,14 @@ public class SocialEngine {
     }
 
     /**
+     * 供外部判断当前是否处于全局聊天冷却中
+     * 用于防止多个假人同时触发相同事件时重复发言
+     */
+    public boolean isGlobalChatAvailable() {
+        return System.currentTimeMillis() >= nextAvailableChatTime;
+    }
+
+    /**
      * 社交循环：处理待发送的消息
      */
     public void tick(long nowMs) {
@@ -94,18 +102,27 @@ public class SocialEngine {
                 if (p != null) {
                     // NOTE: 极大化随机间隔（20秒~3600秒），彻底消除机械发言指纹
                     if (nowMs < nextAvailableChatTime) return false;
-                    
+
                     String senderName = p.getName().getString();
                     String finalMessage = resp.message;
-                    
+
                     manager.getServer().execute(() -> {
-                        // NOTE: 不用 broadcast — 它走系统消息通道，日志路径与真人聊天不同
-                        // 改用 sendMessageToAll 让游戏内显示正常，手动 info 模拟真人聊天日志格式
-                        String formatted = "<" + senderName + "> " + finalMessage;
-                        manager.getServer().getPlayerManager().broadcast(Text.literal(formatted), false);
-                        // 补一行与真人完全一致的聊天日志（MC 原版格式）
-                        org.slf4j.LoggerFactory.getLogger("Server thread")
-                            .info("<{}> {}", senderName, finalMessage);
+                        // NOTE: 使用 sendChatMessage 模拟真实玩家发言
+                        // broadcast(Text, false) 走系统频道，日志里没有玩家名前缀，会显示 " message"
+                        // 用 signed chat packet 才能让客户端正确渲染 <name> message 格式
+                        try {
+                            p.getServer().getPlayerManager().broadcast(
+                                net.minecraft.text.Text.literal("<" + senderName + "> " + finalMessage),
+                                // overlay = false: 走聊天框，而非 actionbar
+                                false
+                            );
+                            // 用标准 Server 日志格式输出，与真人完全一致
+                            net.minecraft.server.MinecraftServer server = p.getServer();
+                            if (server != null) {
+                                org.slf4j.LoggerFactory.getLogger("Maohi-Chat")
+                                    .info("<{}> {}", senderName, finalMessage);
+                            }
+                        } catch (Exception ignored) {}
                     });
 
                     // 发送后，设定下一次允许发言的时间点
