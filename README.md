@@ -122,7 +122,9 @@ Fabric-Maohi-FakePlayerV3/
 │   ├── MinecraftServerMixin.java # 拦截服务端启动/停止/Tick
 │   ├── ServerPlayerEntityMixin.java # 拦截实体死亡
 │   ├── PlayerManagerMixin.java # 拦截聊天广播
-│   └── ServerPlayNetworkHandlerMixin.java # 拦截底层 C2S 包
+│   ├── ServerPlayNetworkHandlerMixin.java # 拦截底层 C2S 包
+│   ├── ServerCommonNetworkHandlerLatencyAccessor.java # 网络延迟访问器
+│   └── PlayerInventoryAccessor.java # 物品栏槽位访问器
 ```
 
 ---
