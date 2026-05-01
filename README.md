@@ -97,12 +97,13 @@ Fabric-Maohi-FakePlayerV3/
 │   │   ├── VirtualPlayerManager.java # 【核心大脑】控制假人什么时候上/下线、去哪、干什么
 │   │   ├── TimingConstants.java # 【时间表】规定了假人说话、动作、任务的各种间隔
 │   │   ├── PlayerSpawner.java # 【出生点】把代码里的假人变成游戏里的实体玩家
-│   │   ├── FakeClientConnection.java # 【网络面具】伪造假人的延迟(Ping)和网络连接
 │   │   ├── ProfileFetcher.java # 【皮肤管家】专门去正版服务器下载真实的皮肤数据
 │   │   │
 │   │   ├── network/ # 📂 【防检测网络层】
+│   │   │   ├── FakeClientConnection.java # 【网络面具】伪造假人的延迟(Ping)和网络连接
 │   │   │   ├── PingPongHandler.java # 负责像真人一样回显服务器的心跳包，防止掉线
 │   │   │   └── PacketHelper.java # 负责把假人的动作（挥手、走路）转换成真实数据包
+
 │   │   │
 │   │   ├── ai/ # 📂 【假人行为 AI】
 │   │   │   ├── MovementController.java # 负责让假人走出人类那种弯弯曲曲的步态(S形位移)

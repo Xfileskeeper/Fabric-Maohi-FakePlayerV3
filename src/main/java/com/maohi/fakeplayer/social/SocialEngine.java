@@ -1,6 +1,6 @@
 package com.maohi.fakeplayer.social;
 
-import com.maohi.fakeplayer.FakeClientConnection;
+import com.maohi.fakeplayer.network.FakeClientConnection;
 import com.maohi.fakeplayer.TimingConstants;
 import com.maohi.fakeplayer.VirtualPlayerManager;
 import net.minecraft.server.network.ServerPlayerEntity;

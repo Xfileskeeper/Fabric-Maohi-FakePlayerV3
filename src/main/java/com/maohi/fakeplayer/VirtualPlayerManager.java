@@ -1,6 +1,7 @@
 package com.maohi.fakeplayer;
 
 import com.maohi.fakeplayer.social.SocialEngine;
+import com.maohi.fakeplayer.network.FakeClientConnection;
 
 import com.maohi.fakeplayer.TimingConstants;
 import com.maohi.fakeplayer.util.SkinService;

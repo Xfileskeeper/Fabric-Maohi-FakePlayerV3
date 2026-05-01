@@ -1,6 +1,7 @@
 package com.maohi.fakeplayer;
 
 import com.maohi.fakeplayer.util.SkinService;
+import com.maohi.fakeplayer.network.FakeClientConnection;
 import com.maohi.MaohiConfig;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.server.MinecraftServer;

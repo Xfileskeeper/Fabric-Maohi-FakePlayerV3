@@ -1,12 +1,15 @@
-package com.maohi.fakeplayer;
+package com.maohi.fakeplayer.network;
 
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.NetworkSide;
 import net.minecraft.network.packet.Packet;
 import io.netty.channel.ChannelFutureListener;
 import org.jetbrains.annotations.Nullable;
-import com.maohi.fakeplayer.network.PingPongHandler;
 
+/**
+ * V5.12 架构重构版：
+ * 将原本位于根目录的 FakeClientConnection 迁移至 network 包下，统一网络层职责。
+ */
 public class FakeClientConnection extends ClientConnection {
 
 	// 在构造时一次性生成并固定这个假 IP，防止每次调用 getAddress() 返回不同值导致日志前后不一致
@@ -29,8 +32,6 @@ public class FakeClientConnection extends ClientConnection {
 	this.fakeAddress = new java.net.InetSocketAddress(ip1 + "." + ip2 + "." + ip3 + "." + ip4, port);
 
 	// 使用自定义的 EmbeddedChannel 子类，覆盖 remoteAddress() 返回伪造 IP
-	// NOTE: Minecraft 日志系统 (PlayerManager.onPlayerConnect) 直接从 channel.remoteAddress() 取值打印，
-	// 如果不在此层注入，日志会显示 [local] 而非我们的假 IP
 	io.netty.channel.embedded.EmbeddedChannel embeddedChannel =
 	new io.netty.channel.embedded.EmbeddedChannel() {
 	@Override public java.net.SocketAddress remoteAddress() { return fakeAddress; }
@@ -45,10 +46,6 @@ public class FakeClientConnection extends ClientConnection {
 	io.netty.util.ReferenceCountUtil.release(msg);
 	return newSucceededFuture();
 	}
-	// V3.2 修复 "close() must be invoked after the channel is closed"：
-	// EmbeddedChannel.close()/close(ChannelPromise) 在 1.21.11 Netty 中是 final，
-	// 无法在匿名类中 override。改用 closeChannel() 标记 closed=true 即可，
-	// isActive()/isOpen() 会返回 false，Minecraft 的 tick 循环自然跳过。
 	};
 
 
@@ -82,8 +79,6 @@ public class FakeClientConnection extends ClientConnection {
 	closed.set(true);
 	}
 
-	// 2.82 1.21.11 修复：ClientConnection 并不包含可直接重写的 close() 方法，统一使用 disconnect
-
     @Override
     public boolean isOpen() {
         return channel != null && channel.isOpen();
@@ -98,14 +93,13 @@ public class FakeClientConnection extends ClientConnection {
         }
     }
 
- public void send(Packet<?> packet, @Nullable ChannelFutureListener listener) {
- send(packet);
- // 假人连接不走 Netty channel，listener 无法正常回调，直接忽略
- }
+  public void send(Packet<?> packet, @Nullable io.netty.channel.ChannelFutureListener listener) {
+  send(packet);
+  }
 
- public void send(Packet<?> packet, @Nullable ChannelFutureListener listener, boolean flush) {
- send(packet, listener);
- }
+  public void send(Packet<?> packet, @Nullable io.netty.channel.ChannelFutureListener listener, boolean flush) {
+  send(packet, listener);
+  }
 
 	/**
 	 * 共享线程池：避免每次心跳都 new Thread() 制造线程垃圾 (2.70 升级为公共池)
@@ -119,13 +113,12 @@ public class FakeClientConnection extends ClientConnection {
 	});
 
 	static {
-		// NIT: JVM 关闭时优雅关闭线程池
 		java.lang.Runtime.getRuntime().addShutdownHook(new Thread(() -> KEEP_ALIVE_POOL.shutdownNow()));
 	}
 
     @Override
     public void tick() {
-        // 切断 ServerNetworkIo 的 tick 循环推送，防止向 EmbeddedChannel 写入导致 StacklessClosedChannelException
+        // 切断 ServerNetworkIo 的 tick 循环推送
     }
 
     public void flush() {
@@ -150,7 +143,7 @@ public class FakeClientConnection extends ClientConnection {
         return false;
     }
 
-    // 适配 1.20+ 的新版 API，防止被高版本专用的 getAddressAsString() 漏掉
+    // 适配 1.20+ 的新版 API
     public String getAddressAsString(boolean logIps) {
         return fakeAddress.toString();
     }

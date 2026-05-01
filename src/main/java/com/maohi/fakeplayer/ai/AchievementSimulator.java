@@ -2,7 +2,7 @@ package com.maohi.fakeplayer.ai;
 
 import com.maohi.fakeplayer.VirtualPlayerManager;
 import com.maohi.fakeplayer.VirtualPlayerManager.Personality;
-import com.maohi.fakeplayer.FakeClientConnection;
+import com.maohi.fakeplayer.network.FakeClientConnection;
 import com.maohi.fakeplayer.TimingConstants;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
