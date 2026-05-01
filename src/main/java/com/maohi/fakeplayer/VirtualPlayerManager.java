@@ -117,9 +117,6 @@ public class VirtualPlayerManager {
         socialEngine.onPlayerDeathNearby(victim);
     }
 
-    public void scheduleDelayedResponse(String[] pool, int minSec, int maxSec, UUID sender) {
-        socialEngine.scheduleDelayedResponse(pool, minSec, maxSec, sender);
-    }
 
     private void manageLoop() {
         while (running) {
@@ -238,7 +235,7 @@ public class VirtualPlayerManager {
 				if (pers != null && !pers.farewellSaid
 						&& System.currentTimeMillis() - pers.lastCommandTime > TimingConstants.FAREWELL_LOCK_DURATION
 						&& socialEngine.isGlobalChatAvailable()) {
-					scheduleDelayedResponse(new String[]{result.message}, 1, 4, id);
+					socialEngine.sendImmediateChat(id, result.message);
 					pers.lastCommandTime = System.currentTimeMillis();
 				}
 			}
@@ -316,7 +313,7 @@ prepareAndSpawnVirtualPlayer();
 				if (personality != null && !personality.farewellSaid && System.currentTimeMillis() - personality.lastCommandTime > TimingConstants.CHITCHAT_COOLDOWN) {
                                 // ★ P0-2: 任务关联型聊天 (替换原有的单调闲聊)
 				String idleMsg = com.maohi.fakeplayer.social.VocabularyBank.getChatByTask(personality.currentTask);
-				scheduleDelayedResponse(new String[]{idleMsg}, 1, 5, speaker);
+				socialEngine.sendImmediateChat(speaker, idleMsg);
                                 personality.lastCommandTime = System.currentTimeMillis();
                             }
                         }
@@ -400,7 +397,7 @@ prepareAndSpawnVirtualPlayer();
 			// V3.1 AFK 系统：真人会临时离开键盘
 			// M1: 委派给 AFKManager
 			boolean isAFK = com.maohi.fakeplayer.ai.AFKManager.tick(p, personality, uuid, tickNow,
-				(msgs, min, max, sender) -> scheduleDelayedResponse(msgs, min, max, sender));
+				(msgs, min, max, sender) -> socialEngine.sendImmediateChat(sender, msgs[0]));
 			if (isAFK) return;
 
 			// V3.1 随机蹲下模拟（真人偶尔会蹲下看东西）
@@ -667,7 +664,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		if (uuid == null || logoutScheduledTime.containsKey(uuid)) return;
 		// 2.70 拟真离线引擎：不直接踢出，而是进入道别流程，模拟自然下线
 		String farewell = com.maohi.fakeplayer.social.VocabularyBank.getFarewell();
-		scheduleDelayedResponse(new String[]{farewell}, 1, 3, uuid);
+		socialEngine.sendImmediateChat(uuid, farewell);
 		long logoutDelay = (5 + ThreadLocalRandom.current().nextInt(10)) * 1000L;
 		logoutScheduledTime.put(uuid, System.currentTimeMillis() + logoutDelay);
 		// V3.2 语义隔离锁：道别后禁言，杜绝穿帮
