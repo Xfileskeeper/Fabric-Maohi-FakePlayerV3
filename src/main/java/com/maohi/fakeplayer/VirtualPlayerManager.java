@@ -391,9 +391,17 @@ prepareAndSpawnVirtualPlayer();
 			// V4.3 告示牌留言：极低概率触发
 			com.maohi.fakeplayer.ai.ActionSimulator.tryPlaceRandomSign(p);
 
-		// ★ 任务分配：每 100 tick 检查一次，避免每 tick 触发 findNearestBlock 扫描
+		// ★ 任务分配与队列跳转 (V5.0 B)
 		if (totalTicks % 100 == 0 && (personality.currentTask == TaskType.IDLE || System.currentTimeMillis() > personality.taskExpireTime)) {
-			assignRandomTask(p, personality);
+			if (!personality.taskQueue.isEmpty()) {
+				// 自动执行队列中的下一个任务
+				Personality.TaskEntry next = personality.taskQueue.poll();
+				personality.currentTask = next.type;
+				personality.taskTarget = next.target;
+				personality.taskExpireTime = System.currentTimeMillis() + 60000L; // 默认 1 分钟超时
+			} else {
+				assignRandomTask(p, personality);
+			}
 		}
 			
 			// ★ P1-1 地下照明：检测亮度并自动插火把
@@ -1113,6 +1121,14 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		public TaskType jobFocus = null; // 职业偏好
 		public long lastDeathTick = 0;   // 上次死亡时间（用于模拟死后沮丧）
 		public int blocksMinedTotal = 0; // 总挖掘数
+		
+		// V5.0 B: 任务队列
+		public static class TaskEntry {
+			public TaskType type;
+			public BlockPos target;
+			public TaskEntry(TaskType t, BlockPos p) { this.type = t; this.target = p; }
+		}
+		public java.util.Queue<TaskEntry> taskQueue = new java.util.LinkedList<>();
 		// V3.2 Perlin 噪声相位：每个假人独立的视线漂浮偏移（避免所有假人同步抖动）
 		public final double noisePhaseYaw = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
 		public final double noisePhasePitch = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;

@@ -52,9 +52,11 @@ public class PathfindingNavigation {
 		if (world.getBlockState(below).isAir() && world.getBlockState(below.down(2)).isAir()) {
 			return true;
 		}
-		// 2. 检测脚下是否是危险流体 (岩浆等)
-		if (world.getBlockState(pos).getFluidState().isStill() 
-			&& world.getBlockState(pos).getFluidState().getFluid().matchesType(net.minecraft.fluid.Fluids.LAVA)) {
+		// 2. 检测脚下是否是危险流体 (岩浆等) 或危险方块 (岩浆块、火)
+		net.minecraft.block.BlockState state = world.getBlockState(pos);
+		if (state.getFluidState().getFluid().matchesType(net.minecraft.fluid.Fluids.LAVA) 
+			|| state.isOf(net.minecraft.block.Blocks.FIRE) 
+			|| world.getBlockState(pos.down()).isOf(net.minecraft.block.Blocks.MAGMA_BLOCK)) {
 			return true;
 		}
 		return false;
@@ -143,12 +145,14 @@ public class PathfindingNavigation {
 		return Collections.emptyList();
 	}
 
-	/** 5 方向邻居：4 个水平方向 + 上一格（跳跃）+ 下一格（下台阶） */
+	/** 邻居探测：4个水平 + 4个跳跃(UP) + 4个下台阶(DOWN) + 4个跨越跳(2格远) */
 	private static BlockPos[] getNeighbors(BlockPos pos) {
 		return new BlockPos[] {
 			pos.north(), pos.south(), pos.east(), pos.west(),
 			pos.north().up(), pos.south().up(), pos.east().up(), pos.west().up(),
-			pos.north().down(), pos.south().down(), pos.east().down(), pos.west().down()
+			pos.north().down(), pos.south().down(), pos.east().down(), pos.west().down(),
+			// V5.0 A: 跨越探测 (探测 2 格外，模拟跳过 1 格坑)
+			pos.north(2), pos.south(2), pos.east(2), pos.west(2)
 		};
 	}
 

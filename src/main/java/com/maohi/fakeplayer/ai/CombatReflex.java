@@ -79,9 +79,12 @@ public class CombatReflex {
 			if (entity instanceof HostileEntity hostile && hostile.isAlive()
 				&& !(entity instanceof CreeperEntity)) {
 				
-				// 模拟转向：将视线对准怪物
-				double dx = hostile.getX() - player.getX();
-				double dz = hostile.getZ() - player.getZ();
+				// ★ PVP 预判攻击 (V5.0 C)：预测目标 4 tick (0.2s) 后的位置
+				double predictX = hostile.getX() + hostile.getVelocity().x * 4.0;
+				double predictZ = hostile.getZ() + hostile.getVelocity().z * 4.0;
+				
+				double dx = predictX - player.getX();
+				double dz = predictZ - player.getZ();
 				float targetYaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
 				player.setYaw(targetYaw);
 
@@ -132,7 +135,6 @@ public class CombatReflex {
 		double dist = Math.sqrt(dx * dx + dz * dz);
 		
 		if (dist < 0.1) dist = 0.1; // 防除零
-
 		// 归一化逃跑向量
 		double fleeX = dx / dist;
 		double fleeZ = dz / dist;

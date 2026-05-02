@@ -75,7 +75,14 @@ public class MovementController {
 		com.maohi.fakeplayer.VirtualPlayerManager.Personality pers =
 			com.maohi.fakeplayer.VirtualPlayerManager.Personality.get(p);
 
-		// 驻足看风景
+		// V5.0 A: 物理跳跃检测 (识别 1 格坑)
+		BlockPos ahead = p.getBlockPos().offset(p.getHorizontalFacing());
+		if (p.isOnGround() && p.getEntityWorld().getBlockState(ahead).isAir() 
+			&& !p.getEntityWorld().getBlockState(ahead.offset(p.getHorizontalFacing())).isAir()) {
+			p.jump();
+		}
+
+		// 平滑转向逻辑
 		if (pers != null && pers.sightseeingTicks > 0) {
 			pers.sightseeingTicks--;
 			stopMovement(p);
