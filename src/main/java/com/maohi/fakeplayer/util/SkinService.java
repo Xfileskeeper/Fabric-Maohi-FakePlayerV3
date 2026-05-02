@@ -11,8 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Mojang 皮肤服务封装（从 Maohi.java 剥离）
- * V3.3: 加入缓存 + 频率限制 + 429 退避
+ * Mojang 皮肤服务封装 (V3)
  */
 public final class SkinService {
 

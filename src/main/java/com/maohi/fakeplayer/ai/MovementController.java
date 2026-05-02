@@ -9,13 +9,7 @@ import net.minecraft.util.math.Vec3d;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 智能运动与环境感知控制器 (V3 核心 AI)
- * 解决 2.0 中假人只会直线推推、遇到墙壁"踩缝纫机"的智障问题。
- * 通过模拟人类跳跃和重新寻路，使其轨迹无限逼近真人在野外的跑酷。
- * 
- * V3.1 增强：Perlin 噪声视线漂浮 + 操作延迟模拟
- * V3.2 修复：噪声相位从 ThreadLocal 改为参数传入，避免主线程多假人共享冲突
- * V3.2 反作弊兼容：用 Access Widener 解锁的 LivingEntity 字段 + travel() 走物理引擎合法移动
+ * 智能运动控制器 (V3)
  */
 public class MovementController {
 

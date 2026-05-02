@@ -5,13 +5,7 @@ import com.maohi.MaohiConfig;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 假人词库系统 (V3.2 全面扩充)
- * 提供各种场景下的随机发言库，并注入情绪（大小写、口癖）。
- * 
- * V3.2 修复：
- * - 从 6 条扩充到 50+ 条/场景，消除复读穿帮
- * - 接入 MaohiConfig 已有词库（chatMessages/greetingReplies/deathReactions）
- * - 新增：苦力怕恐惧词、AFK词、挖到好东西词、PvP词、闲聊词
+ * 假人词库系统 (V3)
  */
 public class VocabularyBank {
 

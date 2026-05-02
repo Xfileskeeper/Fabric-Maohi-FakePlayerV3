@@ -9,17 +9,7 @@ import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 动作与交互模拟器 (V3.3 全链路真实)
- * 
- * V3.3 核心改动：拾取走真实碰撞机制
- * - 掉落物拾取：走 ItemEntity.onPlayerCollision() → 服务端自动入背包+动画
- * - 经验球拾取：走 ExperienceOrbEntity.onPlayerCollision() → 服务端自动加经验
- * - 删除了手动 insertStack/discard/addExperience 的假操作
- * - 删除了 simulateBlockBreaking()（挖掘走真实链路后，服务端自动广播裂纹）
- * 
- * 保留的拟真特性：
- * - 失误模拟（偶尔挖错方块）
- * - 随机空闲交互（开门/蹲下/转头/扔东西）
+ * 动作与交互模拟器 (V3)
  */
 public class ActionSimulator {
 

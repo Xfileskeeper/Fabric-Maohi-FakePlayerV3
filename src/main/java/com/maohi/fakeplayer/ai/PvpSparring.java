@@ -12,8 +12,7 @@ import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 假人间切磋演戏系统 (V4 P1-2)
- * 模拟两个假人在野外相遇时的随机互动。
+ * 假人间切磋演戏系统 (V3)
  */
 public class PvpSparring {
 

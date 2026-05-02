@@ -12,15 +12,7 @@ import net.minecraft.util.Hand;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 生存机制模拟器 (V3.3 全链路真实)
- * 
- * V3.3 核心改动：使用物品走真实发包链路
- * - 吃东西：发 PlayerInteractBlockC2SPacket(USE_ITEM) → 等待 → 发 RELEASE_USE_ITEM
- * - 喝药水：同上，服务端自动应用效果
- * - 弓箭：同上，服务端自动处理拉弓+射箭
- * - 工具切换：发 UpdateSelectedSlotC2SPacket
- * 
- * 全部走 MC 原版机制，服务端自动处理效果/消耗/动画
+ * 生存机制模拟器 (V3)
  */
 public class SurvivalMechanics {
 

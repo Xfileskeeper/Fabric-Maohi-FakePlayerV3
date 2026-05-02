@@ -4,9 +4,7 @@ import com.maohi.fakeplayer.util.SkinService;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * 皮肤抓取器 (V3 核心组件)
- * 专门负责异步请求 Mojang 接口获取皮肤，防止主线程卡顿。
- * 已解耦：不再依赖 Maohi 主类，改用 SkinService
+ * 皮肤抓取器 (V3)
  */
 public class ProfileFetcher {
  

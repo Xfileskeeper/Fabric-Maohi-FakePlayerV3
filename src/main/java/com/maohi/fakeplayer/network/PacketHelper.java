@@ -13,17 +13,7 @@ import net.minecraft.util.math.Vec3d;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 全链路发包工具类 (V3.3 真实链路)
- *
- * 核心原则：先发包（让反作弊看到完整包序列），再调方法（确保服务端逻辑执行）。
- * 这样既骗过包检测，又骗过服务端内部校验。
- *
- * 所有假人的"真实操作"都通过此类发包，确保：
- * 1. 包格式和时序与真实客户端一致
- * 2. 反作弊插件能看到完整的 C2S 包记录
- * 3. 服务端方法正常执行，结果正确
- *
- * V3.5: 屏蔽 Heightmap.Type 枚举的 @Deprecated 警告（过渡期）
+ * 全链路发包工具类 (V3)
  */
 @SuppressWarnings("deprecation")
 public class PacketHelper {

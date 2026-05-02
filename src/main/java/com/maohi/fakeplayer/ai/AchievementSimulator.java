@@ -13,10 +13,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.UUID;
 
 /**
- * M1: 成就模拟器 — 从 VirtualPlayerManager.processHeavyAILogic 拆分
- * 
- * 判定阶梯：
- * L1(1-5m, Lv0+, 90%) | L2(5-10m, Lv3+, 70%) | L3(10-20m, Lv5+, 30%) | L4(20-40m, Lv10+, 8%) | L5(40-80m, Lv15+, 1%)
+ * 成就模拟器 (V3)
  */
 public final class AchievementSimulator {
 

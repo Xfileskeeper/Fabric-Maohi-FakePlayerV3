@@ -11,9 +11,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.UUID;
 
 /**
- * M1: 任务调度器 — 从 VirtualPlayerManager.processHeavyAILogic 拆分
- * 
- * 负责：任务过期判定、新任务分配、目标方块搜索
+ * 任务调度器 (V3)
  */
 public final class TaskScheduler {
 

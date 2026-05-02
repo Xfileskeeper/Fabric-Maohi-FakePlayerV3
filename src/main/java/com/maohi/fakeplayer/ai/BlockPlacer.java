@@ -17,9 +17,7 @@ import net.minecraft.world.LightType;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 方块放置模拟器 (V4 P1-1)
- * 专门处理假人"放置类"操作，特别是地下挖矿时的插火把照明，
- * 极大提升假人行为的拟真度（区别于开夜视的纯挂机脚本）。
+ * 方块放置模拟器 (V3)
  */
 public class BlockPlacer {
 

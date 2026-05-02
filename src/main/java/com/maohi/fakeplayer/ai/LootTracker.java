@@ -10,18 +10,7 @@ import net.minecraft.item.Items;
 import net.minecraft.server.network.ServerPlayerEntity;
 
 /**
- * 物资进阶追踪器 (V3.3 全链路真实 — 1.21.11 组件系统适配版)
- * 
- * 1.21.11 变更：
- * - SwordItem/ArmorItem 子类被移除，改用组件系统
- * - 武器检测：stack.contains(DataComponentTypes.WEAPON)
- * - 护甲检测：stack.get(DataComponentTypes.EQUIPPABLE)
- * - 护甲槽位：equippable.slot()
- * - 武器等级：按 Items 常量判断（组件系统无材质类）
- * 
- * 保留的功能（属于假人"智能"行为，真人也会做）：
- * - tryAutoEquipNearby：捡到装备自动穿戴（真人也会把捡到的铁头盔戴上）
- * - 自动穿戴/换装逻辑
+ * 物资进阶追踪器 (V3)
  */
 public class LootTracker {
 

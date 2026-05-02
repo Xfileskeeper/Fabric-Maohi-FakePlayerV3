@@ -10,9 +10,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.UUID;
 
 /**
- * M1: AFK 管理器 — 从 VirtualPlayerManager.processHeavyAILogic 拆分
- * 
- * 负责：AFK 触发/恢复、离开/回来消息、AFK 中偶尔回头
+ * AFK 管理器 (V3)
  */
 public final class AFKManager {
 

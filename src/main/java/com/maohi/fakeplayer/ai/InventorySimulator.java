@@ -11,15 +11,11 @@ import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 背包与战利品模拟器 (V3 终极拟真特性)
- * 用于在假人进服时或随着在线时间推移，向其背包内随机塞入真实的探索垃圾。
- * 目标：当假人被击杀或被苦力怕炸死时，掉落满地真实的杂物，消除"一眼假"的破绽。
- * 
- * V3.2 修复：使用随机不重复槽位分配，防止多次 setStack 覆盖丢失物品
+ * 背包与战利品模拟器 (V3)
  */
 public class InventorySimulator {
 
-	// 基础垃圾（必定有几组）- V5.15：移除石头，防止秒跳成就
+	// 基础垃圾（必定有几组）
 	private static final Item[] COMMON_JUNKS = {
 		Items.DIRT, Items.OAK_PLANKS, Items.GRAVEL, Items.ANDESITE, Items.GRANITE,
 		Items.TUFF, Items.SAND

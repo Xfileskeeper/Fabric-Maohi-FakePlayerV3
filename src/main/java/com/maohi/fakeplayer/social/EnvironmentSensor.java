@@ -8,15 +8,7 @@ import net.minecraft.world.World;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 假人环境感知神经 (V3.1 社交引擎增强)
- * 能够感知天气、光照、自身着火等环境变化，并产生相应的吐槽。
- * 
- * V3.1 增强：从"只吐槽"升级为"吐槽+行动"
- * - 下雨时尝试找遮蔽物并移动过去
- * - 天黑时尝试找床睡觉（对床方块交互）
- * - 着火时尝试找水源并移动过去
- * 
- * V3.2 修复：接通行动逻辑，返回 BlockPos 让 VPM 接管移动
+ * 假人环境感知神经 (V3)
  */
 public class EnvironmentSensor {
 

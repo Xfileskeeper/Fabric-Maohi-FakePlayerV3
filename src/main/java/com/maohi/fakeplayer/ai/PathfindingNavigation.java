@@ -9,16 +9,7 @@ import net.minecraft.world.chunk.ChunkStatus;
 import java.util.*;
 
 /**
- * 智能路径规避系统 (V3.2 A* 寻路)
- * 负责计算避障路径，防止假人机械性撞墙或掉入深坑。
- * 
- * V3.2 重写：
- * - 基础 A* 寻路：替代随机目标，让假人能绕过障碍
- * - 轻量级实现：限制搜索深度（32 步），避免卡主线程
- * - 兼容原接口：getSafeTopY / isDangerAhead 保留
- * 
- * V3.5: 屏蔽 Heightmap.Type 枚举的 @Deprecated 警告
- * Minecraft 1.21.11 过渡期正确使用 Chunk-based API，枚举警告不可避免但无害
+ * 智能路径规避系统 (V3)
  */
 @SuppressWarnings("deprecation")
 public class PathfindingNavigation {

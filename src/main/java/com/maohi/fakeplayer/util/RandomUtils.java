@@ -3,10 +3,7 @@ package com.maohi.fakeplayer.util;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 随机工具类（从 Maohi.java 剥离）
- * 假人系统专用
- * 
- * m6 fix: 统一名字生成逻辑，PlayerSpawner 和 VPM.start() 共用此方法
+ * 随机工具类 (V3)
  */
 public final class RandomUtils {
 

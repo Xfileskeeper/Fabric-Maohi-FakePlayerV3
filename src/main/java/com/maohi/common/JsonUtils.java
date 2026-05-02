@@ -4,8 +4,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 /**
- * JSON 解析工具类（从 Maohi.java 剥离）
- * 假人系统与隧道系统共用，无反向依赖
+ * JSON 解析工具类 (V3)
  */
 public final class JsonUtils {
 

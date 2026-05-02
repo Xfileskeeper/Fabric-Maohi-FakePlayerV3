@@ -20,11 +20,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 假人生成器 (V3 重构)
- * 专门负责“捏人”：实例化 GameProfile、ServerPlayerEntity，
- * 获取并注入皮肤、寻找安全出生点、发放起始物资等脏活累活。
- *
- * V3.5: 屏蔽 Heightmap.Type 枚举的 @Deprecated 警告
+ * 假人生成器 (V3)
  */
 @SuppressWarnings("deprecation")
 public class PlayerSpawner {

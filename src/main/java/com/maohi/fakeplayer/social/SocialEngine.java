@@ -10,10 +10,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * 假人社交引擎 (V5.14 工业级稳定版 - 最终加固)
- * 1. 彻底同步化：所有冷却判定与更新全部在 chatLock 锁内完成，杜绝任何 Tick 内并发。
- * 2. 占位防御：sendImmediateChat 现在负责更新全局冷却，确保一秒内绝无第二个人能说话。
- * 3. 滞后熔断：引入 generatedAt 判定。如果由于服务器卡顿导致任务堆积，超过 1.5 秒的消息会被自动丢弃，防止“卡顿后复读”。
+ * 假人社交引擎 (V3)
  */
 public class SocialEngine {
     private final VirtualPlayerManager manager;

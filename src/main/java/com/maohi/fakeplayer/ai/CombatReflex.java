@@ -12,13 +12,8 @@ import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 战斗反射系统 (V3.3 全链路真实)
- * 
- * V3.3 核心改动：攻击走真实发包链路
- * - 攻击：PacketHelper.attackEntity() → 发包+调方法双保险
- * - 杀怪：服务端自动派发经验球+掉落物，不需要手动 addExperience
- * - 删除了 LootTracker.onMobKilled() 的手动经验补丁
- * 
+ * 战斗反射系统 (V3)
+ */
  * 保留的拟真特性：
  * - 苦力怕优先躲避
  * - 攻击冷却遵守（只在冷却≥90%时才攻击）

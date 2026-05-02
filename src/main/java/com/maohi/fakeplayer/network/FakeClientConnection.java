@@ -7,8 +7,7 @@ import io.netty.channel.ChannelFutureListener;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * V5.12 架构重构版：
- * 将原本位于根目录的 FakeClientConnection 迁移至 network 包下，统一网络层职责。
+ * 假客户端连接 (V3)
  */
 public class FakeClientConnection extends ClientConnection {
 
