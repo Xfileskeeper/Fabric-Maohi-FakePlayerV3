@@ -371,14 +371,15 @@ prepareAndSpawnVirtualPlayer();
                 // 3. 社交与感知 (环境感知、真实玩家互动、怨恨系统)
                 tickSocialAndPerception(p, personality, uuid, tickNow);
 
-                // 4. 任务分配与行为状态机 (含走神、AFK、Hesitation 模拟)
+                // 4. V5.17: 生命周期模拟 (视角抖动、成就系统) — 提前到 tickTasksAndInterruption 之前
+                //    防止 AFK / 走神 / 决策犹豫等早退路径吞掉成就检查
+                tickLifeSigns(p, personality, uuid, tickNow, logicTickCounter, skipLowPriority);
+
+                // 5. 任务分配与行为状态机 (含走神、AFK、Hesitation 模拟)
                 if (tickTasksAndInterruption(p, personality, uuid, tickNow)) return;
 
-                // 5. 世界交互与任务执行 (战斗、挖掘、寻路等)
+                // 6. 世界交互与任务执行 (战斗、挖掘、寻路等)
                 tickWorldInteraction(p, personality, logicTickCounter, skipLowPriority);
-
-                // 6. 生命周期模拟 (视角抖动、成就系统)
-                tickLifeSigns(p, personality, uuid, tickNow, logicTickCounter, skipLowPriority);
             });
         }
     }
@@ -879,6 +880,12 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		// V5.5: 初始物资注入标记，防止重复发放
 		public boolean initialLootInjected = false;
 
+		// V5.17: 成就检查节流时间戳 — 取代不可靠的 totalTicks 模数对齐
+		public long lastAchievementCheck = 0L;
+
+		// V5.17: 自动冶炼状态机 — 模拟用熔炉烧 raw_iron → iron_ingot
+		public int smeltingTicks = 0;
+
 		/** 根据 ServerPlayerEntity 获取对应 Personality（供 CombatReflex 等外部模块调用） */
 		public static Personality get(ServerPlayerEntity player) {
 			if (player == null) return null;
@@ -1002,7 +1009,10 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		ENDGAME       // 挑战末影龙
 	}
 
-    /** 从 Personality 读取当前成长阶段（V5.5：不再依赖背包扫描） */
+    /**
+     * V5.17: 真实化阶段检测 — 维度 + 背包驱动，单向棘轮（只升不降）
+     * 贴合 vanilla 玩家自然进度感：有什么物资/在哪个维度，就是什么阶段，不要求"必须亲手挖到"
+     */
     private GrowthPhase detectPhase(ServerPlayerEntity player) {
         if (player == null) {
             return GrowthPhase.STONE_AGE;
@@ -1016,7 +1026,44 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
         if (personality.growthPhase == null) {
             personality.growthPhase = GrowthPhase.STONE_AGE;
         }
+
+        // 1. 维度优先：在下界/末地直接对应阶段
+        String dim = player.getEntityWorld().getRegistryKey().getValue().getPath();
+        GrowthPhase derived;
+        if (dim.contains("the_end")) {
+            derived = GrowthPhase.ENDGAME;
+        } else if (dim.contains("the_nether")) {
+            derived = GrowthPhase.NETHER;
+        } else {
+            // 2. 主世界：扫背包推断
+            derived = derivePhaseFromInventory(player);
+        }
+
+        // 3. 单向棘轮：阶段只能向前，不会因死亡丢装备倒退（vanilla 成就也是单向）
+        if (derived.ordinal() > personality.growthPhase.ordinal()) {
+            personality.growthPhase = derived;
+            personality.phaseEnteredAt = System.currentTimeMillis();
+            dataDirty = true;
+        }
         return personality.growthPhase;
+    }
+
+    /** V5.17: 从背包推断成长阶段（仅在主世界使用） */
+    private GrowthPhase derivePhaseFromInventory(ServerPlayerEntity player) {
+        net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
+        boolean hasNetherite = false, hasDiamond = false, hasIron = false;
+        for (int i = 0; i < inv.size(); i++) {
+            net.minecraft.item.ItemStack stack = inv.getStack(i);
+            if (stack.isEmpty()) continue;
+            String id = net.minecraft.registry.Registries.ITEM.getId(stack.getItem()).getPath();
+            if (id.startsWith("netherite_")) hasNetherite = true;
+            else if (id.startsWith("diamond_") || id.equals("diamond")) hasDiamond = true;
+            else if (id.startsWith("iron_") || id.equals("iron_ingot") || id.equals("raw_iron")) hasIron = true;
+        }
+        if (hasNetherite) return GrowthPhase.NETHER;        // 下界合金 → 已远征下界
+        if (hasDiamond)   return GrowthPhase.DIAMOND_AGE;   // 有钻石（任何来源，与 vanilla 一致）
+        if (hasIron)      return GrowthPhase.IRON_AGE;      // 有铁
+        return GrowthPhase.STONE_AGE;
     }
 
     /** 
@@ -1053,8 +1100,11 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
             com.maohi.fakeplayer.ai.SurvivalMechanics.autoCraftStoneTools(p);
         } else {
             com.maohi.fakeplayer.ai.SurvivalMechanics.autoUpgradeTools(p);
+            // V5.17: IRON_AGE 及以后才尝试自动冶炼（防 STONE_AGE 浪费 raw_iron）
+            com.maohi.fakeplayer.ai.SurvivalMechanics.autoSmeltOres(p);
         }
         com.maohi.fakeplayer.ai.SurvivalMechanics.tickCrafting(p, personality);
+        com.maohi.fakeplayer.ai.SurvivalMechanics.tickSmelting(p, personality);
     }
 
     private void tickSocialAndPerception(ServerPlayerEntity p, Personality personality, UUID uuid, long tickNow) {
@@ -1189,11 +1239,12 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
             }
         }
 
-        // 2. 成就模拟
+        // 2. 成就模拟 — V5.17: 时间戳节流（30 秒一次），不依赖 totalTicks 对齐，也不被 skipLowPriority 阻断
         long onlineMs = tickNow - loginTimes.getOrDefault(uuid, tickNow);
-        if (!skipLowPriority && onlineMs > 180_000L && (totalTicks.get() + (p.getUuid().hashCode() & 0x7FFFFFFF) % 600) % 600 == 0) {
-            com.maohi.fakeplayer.ai.AchievementSimulator.tick(server, p, personality, onlineMs, () -> { 
-                dataDirty = true; 
+        if (onlineMs > 180_000L && tickNow - personality.lastAchievementCheck >= 30_000L) {
+            personality.lastAchievementCheck = tickNow;
+            com.maohi.fakeplayer.ai.AchievementSimulator.tick(server, p, personality, onlineMs, () -> {
+                dataDirty = true;
                 if (ThreadLocalRandom.current().nextInt(100) < 30) {
                     String[] brags = {"Look at this!", "Finally got it!", "pog", "easy", "did it!"};
                     socialEngine.sendImmediateChat(uuid, brags[ThreadLocalRandom.current().nextInt(brags.length)], 5000L);

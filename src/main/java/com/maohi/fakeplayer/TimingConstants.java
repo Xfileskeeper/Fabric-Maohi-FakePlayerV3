@@ -21,10 +21,10 @@ public final class TimingConstants {
 	public static final long NEARBY_GREET_COOLDOWN = 10_000L;
 
 	// === 任务超时（毫秒）===
-	/** 探索/闲逛任务超时 */
-	public static final long TASK_TIMEOUT_EXPLORE = 15_000L;
-	/** 工作（挖矿/砍树）任务超时 */
-	public static final long TASK_TIMEOUT_WORK = 10_000L;
+	/** 探索/闲逛任务超时 — V5.17: 15s → 30s（给假人留时间寻路） */
+	public static final long TASK_TIMEOUT_EXPLORE = 30_000L;
+	/** 工作（挖矿/砍树）任务超时 — V5.17: 10s → 45s（移动 + 实际挖一两个方块所需时间） */
+	public static final long TASK_TIMEOUT_WORK = 45_000L;
 	/** 长周期任务超时（30分钟） */
 	public static final long TASK_TIMEOUT_LONG = 1_800_000L;
 

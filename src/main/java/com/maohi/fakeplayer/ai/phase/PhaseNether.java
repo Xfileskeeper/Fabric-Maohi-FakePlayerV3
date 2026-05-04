@@ -108,9 +108,10 @@ public final class PhaseNether {
 
     /**
      * 尝试寻找或建造下界传送门
+     * V5.17: 改为 public 以便 PhaseDiamondAge 在材料齐全时主动调用，打破鸡蛋死锁
      * @return true 如果成功进入传送门流程
      */
-    private static boolean tryFindOrBuildPortal(ServerPlayerEntity player, Personality personality) {
+    public static boolean tryFindOrBuildPortal(ServerPlayerEntity player, Personality personality) {
         ServerWorld world = player.getEntityWorld();
         BlockPos playerPos = player.getBlockPos();
 
@@ -222,8 +223,9 @@ public final class PhaseNether {
     /**
      * 检查是否有建造传送门的材料
      * 需要：10+ 黑曜石 + 打火石
+     * V5.17: public 化以便 PhaseDiamondAge 预判
      */
-    private static boolean hasMaterialsForPortal(ServerPlayerEntity player) {
+    public static boolean hasMaterialsForPortal(ServerPlayerEntity player) {
         net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
         int obsidianCount = 0;
         boolean hasFlintAndSteel = false;
