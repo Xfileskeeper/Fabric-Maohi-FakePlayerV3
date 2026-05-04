@@ -242,29 +242,47 @@ public class SurvivalMechanics {
 			if (pers.craftingTicks == 0 && pers.craftingTarget != null) {
 				PlayerInventory inv = player.getInventory();
 				net.minecraft.item.Item target = pers.craftingTarget;
-				// 判断材料类型
-				net.minecraft.item.Item material;
-				int materialCount = 3;
-				if (target == Items.DIAMOND_PICKAXE) { material = Items.DIAMOND; }
-				else if (target == Items.STONE_PICKAXE || target == Items.STONE_SWORD || target == Items.STONE_AXE) { material = Items.COBBLESTONE; }
-				else { material = Items.IRON_INGOT; }
+				
+				boolean craftSuccess = false;
+				if (target == Items.BEACON) {
+					// V5.19: 信标合成 (5 玻璃 + 3 黑曜石 + 1 凋零之星)
+					if (hasMaterial(inv, Items.GLASS, 5) && 
+						hasMaterial(inv, Items.OBSIDIAN, 3) && 
+						hasMaterial(inv, Items.NETHER_STAR, 1)) {
+						
+						consumeMaterial(inv, Items.GLASS, 5);
+						consumeMaterial(inv, Items.OBSIDIAN, 3);
+						consumeMaterial(inv, Items.NETHER_STAR, 1);
+						inv.offerOrDrop(new ItemStack(Items.BEACON));
+						craftSuccess = true;
+					}
+				} else {
+					// 原有简单合成逻辑
+					net.minecraft.item.Item material;
+					int materialCount = 3;
+					if (target == Items.DIAMOND_PICKAXE) { material = Items.DIAMOND; }
+					else if (target == Items.STONE_PICKAXE || target == Items.STONE_SWORD || target == Items.STONE_AXE) { material = Items.COBBLESTONE; }
+					else { material = Items.IRON_INGOT; }
 
-				if (hasMaterial(inv, material, materialCount)) {
-					consumeMaterial(inv, material, materialCount);
-					// 石器：直接放入背包空槽；升级工具：替换旧工具
-					boolean placed = false;
-					if (target == Items.STONE_PICKAXE || target == Items.STONE_SWORD || target == Items.STONE_AXE) {
-						int slot = inv.getEmptySlot();
-						if (slot != -1) { inv.setStack(slot, new ItemStack(target)); placed = true; }
-					} else {
-						for (int i = 0; i < 9; i++) {
-							ItemStack s = inv.getStack(i);
-							if (!s.isEmpty() && (s.getItem() == Items.STONE_PICKAXE || s.getItem() == Items.IRON_PICKAXE || s.getItem() == Items.STONE_AXE)) {
-								inv.setStack(i, new ItemStack(target)); placed = true; break;
+					if (hasMaterial(inv, material, materialCount)) {
+						consumeMaterial(inv, material, materialCount);
+						// 石器：直接放入背包空槽；升级工具：替换旧工具
+						if (target == Items.STONE_PICKAXE || target == Items.STONE_SWORD || target == Items.STONE_AXE) {
+							int slot = inv.getEmptySlot();
+							if (slot != -1) { inv.setStack(slot, new ItemStack(target)); craftSuccess = true; }
+						} else {
+							for (int i = 0; i < 9; i++) {
+								ItemStack s = inv.getStack(i);
+								if (!s.isEmpty() && (s.getItem() == Items.STONE_PICKAXE || s.getItem() == Items.IRON_PICKAXE || s.getItem() == Items.STONE_AXE)) {
+									inv.setStack(i, new ItemStack(target)); craftSuccess = true; break;
+								}
 							}
 						}
 					}
-					if (placed) player.getEntityWorld().playSound(null, player.getX(), player.getY(), player.getZ(),
+				}
+
+				if (craftSuccess) {
+					player.getEntityWorld().playSound(null, player.getX(), player.getY(), player.getZ(),
 						net.minecraft.sound.SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, net.minecraft.sound.SoundCategory.PLAYERS, 0.5f, 1.0f);
 				}
 				

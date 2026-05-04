@@ -174,6 +174,55 @@ public final class MilestoneActions {
 		player.swingHand(Hand.MAIN_HAND, true);
 	}
 
+	/* ==================== 4. Adventuring Time: 记录群系与长途旅行 ==================== */
+
+	/** 记录当前所在的群系 (V5.19) */
+	public static void recordCurrentBiome(ServerPlayerEntity player, Personality personality) {
+		if (personality == null) return;
+		// 节流：每分钟检查一次
+		if (ThreadLocalRandom.current().nextInt(1200) != 0) return;
+
+		net.minecraft.registry.entry.RegistryEntry<net.minecraft.world.biome.Biome> biomeEntry = player.getEntityWorld().getBiome(player.getBlockPos());
+		biomeEntry.getKey().ifPresent(key -> {
+			String biomeId = key.getValue().toString();
+			personality.visitedBiomes.add(biomeId);
+		});
+	}
+
+	/**
+	 * 偶尔发起长途旅行，跨越群系 (V5.19)
+	 * 设计目标：探索 800-2000 格外的新群系，达成 [Adventuring Time]
+	 */
+	public static void tryLongDistanceTrip(ServerPlayerEntity player, Personality personality) {
+		if (personality == null) return;
+		if (personality.longTripTarget != null) {
+			// 如果已到达目标附近，则清除
+			if (player.getBlockPos().getSquaredDistance(personality.longTripTarget) < 256.0) {
+				personality.longTripTarget = null;
+			}
+			return;
+		}
+
+		// 节流：距上次长途至少 20 分钟
+		if (System.currentTimeMillis() - personality.lastLongTripStartedAt < 1_200_000L) return;
+		
+		// 随缘触发：2% 概率（每 50 分钟一次）
+		if (ThreadLocalRandom.current().nextInt(100) >= 2) return;
+
+		double angle = ThreadLocalRandom.current().nextDouble() * Math.PI * 2;
+		// 初步测试建议距离不要太大，200-500 格，后续可放宽
+		int dist = 200 + ThreadLocalRandom.current().nextInt(300); 
+		int fx = (int)(Math.cos(angle) * dist);
+		int fz = (int)(Math.sin(angle) * dist);
+		BlockPos far = player.getBlockPos().add(fx, 0, fz);
+
+		personality.longTripTarget = far;
+		personality.taskTarget = far;
+		personality.currentTask = VirtualPlayerManager.TaskType.EXPLORING;
+		personality.taskExpireTime = System.currentTimeMillis() + 1_800_000L; // 30 分钟超时
+		personality.lastLongTripStartedAt = System.currentTimeMillis();
+	}
+
 	/* ==================== 工具方法 ==================== */
 
 	private static BlockPos findNearbyLavaSource(ServerPlayerEntity player, int radius) {

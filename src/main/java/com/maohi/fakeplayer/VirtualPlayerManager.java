@@ -113,6 +113,7 @@ public class VirtualPlayerManager {
         Personality personality = playerPersonalities.get(uuid);
         if (personality != null) {
             personality.lastDeathTick = server.getTicks();
+            personality.longTripTarget = null; // V5.19: 死亡时中断远途旅行
         }
 
         long delay = (config().respawnDelayMinSec + ThreadLocalRandom.current().nextInt(config().respawnDelayMaxSec - config().respawnDelayMinSec + 1)) * 1000L;
@@ -883,6 +884,22 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		// V5.17: 成就检查节流时间戳 — 取代不可靠的 totalTicks 模数对齐
 		public long lastAchievementCheck = 0L;
 
+		// V5.19: Adventuring Time 长途旅行支持
+		public java.util.Set<String> visitedBiomes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+		public long lastLongTripStartedAt = 0L;
+		public BlockPos longTripTarget = null;  // 当前远途目的地，到达后清空
+
+		// V5.19: Hero of the Village 支持
+		public BlockPos homeVillagePos = null;        // 关联的村庄中心
+		public long lastVillageCheckAt = 0L;          // 上次扫描村庄时间
+		public long inRaidUntil = 0L;                 // 处于袭击战斗状态的截止时间
+
+		// V5.19: Bring Home the Beacon 子状态机
+		public com.maohi.fakeplayer.ai.BeaconQuestStage beaconStage = com.maohi.fakeplayer.ai.BeaconQuestStage.NOT_STARTED;
+		public BlockPos witherBuildPos = null;   // 凋零结构放置位置
+		public BlockPos beaconPlacePos = null;   // 信标放置位置
+		public long beaconStageEnteredAt = 0L;
+
 		// V5.17: 自动冶炼状态机 — 模拟用熔炉烧 raw_iron → iron_ingot
 		public int smeltingTicks = 0;
 
@@ -1151,6 +1168,16 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
         com.maohi.fakeplayer.ai.MilestoneActions.tryFillLavaBucket(p, personality);
         com.maohi.fakeplayer.ai.MilestoneActions.tryThrowEnderEye(p, personality);
         com.maohi.fakeplayer.ai.MilestoneActions.tryBreedAnimals(p, personality);
+        // V5.19: Adventuring Time 任务挂接
+        com.maohi.fakeplayer.ai.MilestoneActions.recordCurrentBiome(p, personality);
+        com.maohi.fakeplayer.ai.MilestoneActions.tryLongDistanceTrip(p, personality);
+
+        // V5.19: Hero of the Village 任务挂接
+        com.maohi.fakeplayer.ai.VillageDefender.tryFindHomeVillage(p, personality);
+        com.maohi.fakeplayer.ai.VillageDefender.tryParticipateRaid(p, personality);
+
+        // V5.19: Bring Home the Beacon 任务挂接
+        com.maohi.fakeplayer.ai.BeaconQuest.tickBeaconQuest(p, personality);
     }
 
     private void tickSocialAndPerception(ServerPlayerEntity p, Personality personality, UUID uuid, long tickNow) {
@@ -1209,6 +1236,9 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
     }
 
     private boolean tickTasksAndInterruption(ServerPlayerEntity p, Personality personality, UUID uuid, long tickNow) {
+        // V5.19: 袭击保卫战期间，严禁任务切换覆盖
+        if (tickNow < personality.inRaidUntil) return false;
+
         // ★ 任务分配与队列跳转
         if (totalTicks.get() % 100 == 0 && (personality.currentTask == TaskType.IDLE || System.currentTimeMillis() > personality.taskExpireTime)) {
             if (!personality.taskQueue.isEmpty()) {
