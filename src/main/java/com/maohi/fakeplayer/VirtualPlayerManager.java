@@ -1338,6 +1338,14 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
                 if (personality.miningSkill < 1.5) personality.miningSkill += 0.001;
 
                 if (personality.currentTask == TaskType.MINING) {
+                    // 【V5.5 加固】钻石挖掘真实性二次校验
+                    net.minecraft.block.BlockState beforeState = p.getEntityWorld().getBlockState(finalMinePos);
+                    if (com.maohi.fakeplayer.ai.phase.PhaseDiamondAge.isDiamondOre(beforeState)) {
+                        // 方块破坏后（PacketHelper.finishDestroyBlock 是异步发包，但在服务端逻辑中此时方块状态已更新或即将更新）
+                        // 为确保物理真实性，我们在状态确认后标记证据
+                        com.maohi.fakeplayer.ai.phase.PhaseDiamondAge.markDiamondOreMined(p, personality);
+                    }
+
                     String oreKey = minedType.contains("_ore") ? minedType.replace("_ore","").replace("deepslate_","") : null;
                     personality.taskTarget = oreKey != null ? findNearestBlock(p.getEntityWorld(), finalMinePos, 3, oreKey + "_ore") : null;
                 } else {
