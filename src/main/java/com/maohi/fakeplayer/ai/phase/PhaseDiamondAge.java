@@ -13,7 +13,9 @@ import java.util.concurrent.ThreadLocalRandom;
 /**
  * 第三阶段：钻石时代 (V3)
  */
-public final class PhaseDiamondAge {
+public final class PhaseDiamondAge implements Phase {
+
+    public static final Phase INSTANCE = new PhaseDiamondAge();
 
     private PhaseDiamondAge() {}
 
@@ -35,10 +37,8 @@ public final class PhaseDiamondAge {
         // （挖到钻石矿后，钻石进入背包，detectPhase 自然识别为 DIAMOND_AGE）
     }
 
-    public static void assignTask(ServerPlayerEntity player, Personality personality,
-                                   java.util.function.BiFunction<net.minecraft.server.world.ServerWorld, BlockPos, BlockPos> findOre,
-                                   java.util.function.BiFunction<net.minecraft.server.world.ServerWorld, BlockPos, BlockPos> findLog,
-                                   java.util.function.Supplier<net.minecraft.entity.mob.HostileEntity> findHunt) {
+    @Override
+    public void assignTask(ServerPlayerEntity player, Personality personality, PhaseContext ctx) {
         // V5.17: 材料齐全时优先建造/寻找下界传送门，打破 DIAMOND_AGE → NETHER 的鸡蛋死锁
         // 黑曜石 ≥ 10 + 打火石 → 调用 PhaseNether 的传送门逻辑
         if (PhaseNether.hasMaterialsForPortal(player)) {
@@ -51,15 +51,15 @@ public final class PhaseDiamondAge {
         int roll = ThreadLocalRandom.current().nextInt(100);
         if (roll < 50) {
             int mineY = -50 - ThreadLocalRandom.current().nextInt(10);
-            BlockPos target = findOre.apply(player.getEntityWorld(), player.getBlockPos());
+            BlockPos target = ctx.findOre.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) target = new BlockPos(player.getBlockX() + rnd(10) - 5, mineY, player.getBlockZ() + rnd(10) - 5);
             set(personality, TaskType.MINING, target, TimingConstants.TASK_TIMEOUT_WORK);
         } else if (roll < 70) {
-            BlockPos target = findLog.apply(player.getEntityWorld(), player.getBlockPos());
+            BlockPos target = ctx.findLog.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) target = player.getBlockPos().add(rnd(60) - 30, 0, rnd(60) - 30);
             set(personality, TaskType.WOODCUTTING, target, TimingConstants.TASK_TIMEOUT_WORK);
         } else if (roll < 85) {
-            net.minecraft.entity.mob.HostileEntity huntTarget = findHunt.get();
+            net.minecraft.entity.mob.HostileEntity huntTarget = ctx.findHunt.get();
             if (huntTarget != null) {
                 personality.currentTask = TaskType.HUNTING;
                 personality.taskTarget = huntTarget.getBlockPos();

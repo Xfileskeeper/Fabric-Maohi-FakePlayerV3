@@ -26,29 +26,29 @@ import java.util.concurrent.ThreadLocalRandom;
  *   - 制作铁器三件套
  *   - 建造简易基地
  */
-public final class PhaseIronAge {
+public final class PhaseIronAge implements Phase {
+
+    public static final Phase INSTANCE = new PhaseIronAge();
 
     private PhaseIronAge() {}
 
-    public static void assignTask(ServerPlayerEntity player, Personality personality,
-                                   java.util.function.BiFunction<net.minecraft.server.world.ServerWorld, BlockPos, BlockPos> findOre,
-                                   java.util.function.BiFunction<net.minecraft.server.world.ServerWorld, BlockPos, BlockPos> findLog,
-                                   java.util.function.Supplier<net.minecraft.entity.mob.HostileEntity> findHunt) {
+    @Override
+    public void assignTask(ServerPlayerEntity player, Personality personality, PhaseContext ctx) {
         int roll = ThreadLocalRandom.current().nextInt(100);
 
         if (roll < 55) {
-            BlockPos target = findOre.apply(player.getEntityWorld(), player.getBlockPos());
+            BlockPos target = ctx.findOre.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) {
                 int mineY = 8 + ThreadLocalRandom.current().nextInt(8);
                 target = new BlockPos(player.getBlockX() + rnd(10) - 5, mineY, player.getBlockZ() + rnd(10) - 5);
             }
             set(personality, TaskType.MINING, target, TimingConstants.TASK_TIMEOUT_WORK);
         } else if (roll < 75) {
-            BlockPos target = findLog.apply(player.getEntityWorld(), player.getBlockPos());
+            BlockPos target = ctx.findLog.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) target = player.getBlockPos().add(rnd(60) - 30, 0, rnd(60) - 30);
             set(personality, TaskType.WOODCUTTING, target, TimingConstants.TASK_TIMEOUT_WORK);
         } else if (roll < 90) {
-            net.minecraft.entity.mob.HostileEntity huntTarget = findHunt.get();
+            net.minecraft.entity.mob.HostileEntity huntTarget = ctx.findHunt.get();
             if (huntTarget != null) {
                 personality.currentTask = TaskType.HUNTING;
                 personality.taskTarget = huntTarget.getBlockPos();

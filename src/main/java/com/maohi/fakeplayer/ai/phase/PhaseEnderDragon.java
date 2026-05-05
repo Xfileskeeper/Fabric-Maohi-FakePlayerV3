@@ -44,15 +44,19 @@ import java.util.concurrent.ThreadLocalRandom;
  *   - 末地传送门框架使用 Blocks.END_PORTAL_FRAME
  *   - 末影龙实体使用 EnderDragonEntity
  */
-public final class PhaseEnderDragon {
+public final class PhaseEnderDragon implements Phase {
+
+    public static final Phase INSTANCE = new PhaseEnderDragon();
 
     private PhaseEnderDragon() {}
 
     /**
      * 分配末影龙阶段任务
+     * NOTE: PhaseContext 字段在本阶段未使用——末影龙战斗 / 末地水晶等都在文件内部静态查找。
+     * 保留 ctx 参数以满足接口契约。
      */
-    public static void assignTask(ServerPlayerEntity player, Personality personality,
-                                   java.util.function.Supplier<HostileEntity> findHunt) {
+    @Override
+    public void assignTask(ServerPlayerEntity player, Personality personality, PhaseContext ctx) {
         ServerWorld world = player.getEntityWorld();
         boolean isEnd = world.getRegistryKey() == World.END;
         boolean isOverworld = world.getRegistryKey() == World.OVERWORLD;

@@ -811,28 +811,25 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
         }
     }
 
+    /** V5.20: 5-case switch 改成 registry 派发 */
+    private static final java.util.Map<GrowthPhase, com.maohi.fakeplayer.ai.phase.Phase> PHASE_REGISTRY = java.util.Map.of(
+        GrowthPhase.STONE_AGE,    com.maohi.fakeplayer.ai.phase.PhaseStoneAge.INSTANCE,
+        GrowthPhase.IRON_AGE,     com.maohi.fakeplayer.ai.phase.PhaseIronAge.INSTANCE,
+        GrowthPhase.DIAMOND_AGE,  com.maohi.fakeplayer.ai.phase.PhaseDiamondAge.INSTANCE,
+        GrowthPhase.NETHER,       com.maohi.fakeplayer.ai.phase.PhaseNether.INSTANCE,
+        GrowthPhase.ENDGAME,      com.maohi.fakeplayer.ai.phase.PhaseEnderDragon.INSTANCE
+    );
+
     private void assignRandomTask(ServerPlayerEntity player, Personality personality) {
         GrowthPhase phase = detectPhase(player);
-        switch (phase) {
-            case STONE_AGE -> com.maohi.fakeplayer.ai.phase.PhaseStoneAge.assignTask(player, personality,
-                (world, pos) -> findNearestBlock(world, pos, 20, "log"));
-            case IRON_AGE -> com.maohi.fakeplayer.ai.phase.PhaseIronAge.assignTask(player, personality,
-                (world, pos) -> findNearestBlock(world, pos, 20, "ore"),
-                (world, pos) -> findNearestBlock(world, pos, 20, "log"),
-                () -> findHuntTarget(player));
-            case DIAMOND_AGE -> com.maohi.fakeplayer.ai.phase.PhaseDiamondAge.assignTask(player, personality,
-                (world, pos) -> findNearestBlock(world, pos, 20, "ore"),
-                (world, pos) -> findNearestBlock(world, pos, 20, "log"),
-                () -> findHuntTarget(player));
-            case NETHER -> {
-                // 如果已经在下界，使用下界专用矿石搜索
-                com.maohi.fakeplayer.ai.phase.PhaseNether.assignTask(player, personality,
-                    (world, pos) -> findNearestBlock(world, pos, 20, "ore"),
-                    () -> findHuntTarget(player));
-            }
-            case ENDGAME -> com.maohi.fakeplayer.ai.phase.PhaseEnderDragon.assignTask(player, personality,
-                () -> findHuntTarget(player));
-        }
+        com.maohi.fakeplayer.ai.phase.Phase impl = PHASE_REGISTRY.get(phase);
+        if (impl == null) return;
+        com.maohi.fakeplayer.ai.phase.PhaseContext ctx = new com.maohi.fakeplayer.ai.phase.PhaseContext(
+            (world, pos) -> findNearestBlock(world, pos, 20, "ore"),
+            (world, pos) -> findNearestBlock(world, pos, 20, "log"),
+            () -> findHuntTarget(player)
+        );
+        impl.assignTask(player, personality, ctx);
     }
 
 

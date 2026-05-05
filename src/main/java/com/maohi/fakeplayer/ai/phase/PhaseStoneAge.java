@@ -27,12 +27,14 @@ import java.util.concurrent.ThreadLocalRandom;
  *   - 制作熔炉烤肉
  *   - 搭建简易庇护所
  */
-public final class PhaseStoneAge {
+public final class PhaseStoneAge implements Phase {
+
+    public static final Phase INSTANCE = new PhaseStoneAge();
 
     private PhaseStoneAge() {}
 
-    public static void assignTask(ServerPlayerEntity player, Personality personality,
-                                   java.util.function.BiFunction<net.minecraft.server.world.ServerWorld, BlockPos, BlockPos> findBlock) {
+    @Override
+    public void assignTask(ServerPlayerEntity player, Personality personality, PhaseContext ctx) {
         net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
         boolean hasPickaxe = false, hasStoneTools = false, hasSword = false;
         int woodCount = 0, cobbleCount = 0;
@@ -47,7 +49,7 @@ public final class PhaseStoneAge {
 
         // 1. 没有镐子且木头不足 → 砍树
         if (!hasPickaxe && woodCount < 10) {
-            BlockPos target = findBlock.apply(player.getEntityWorld(), player.getBlockPos());
+            BlockPos target = ctx.findLog.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) target = player.getBlockPos().add(rnd(40) - 20, 0, rnd(40) - 20);
             set(personality, TaskType.WOODCUTTING, target);
             return;
@@ -55,7 +57,7 @@ public final class PhaseStoneAge {
 
         // 2. 没有石器且圆石不足 → 挖石头
         if (!hasStoneTools && cobbleCount < 15) {
-            BlockPos target = findBlock.apply(player.getEntityWorld(), player.getBlockPos());
+            BlockPos target = ctx.findLog.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) target = player.getBlockPos().down(2);
             set(personality, TaskType.MINING, target);
             return;
@@ -69,7 +71,7 @@ public final class PhaseStoneAge {
 
         // 4. 默认：砍树60% / 挖石头40%
         if (ThreadLocalRandom.current().nextInt(100) < 60) {
-            BlockPos target = findBlock.apply(player.getEntityWorld(), player.getBlockPos());
+            BlockPos target = ctx.findLog.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) target = player.getBlockPos().add(rnd(40) - 20, 0, rnd(40) - 20);
             set(personality, TaskType.WOODCUTTING, target);
         } else {

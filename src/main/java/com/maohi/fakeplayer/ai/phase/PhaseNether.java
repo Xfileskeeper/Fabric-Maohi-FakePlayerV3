@@ -44,16 +44,19 @@ import java.util.concurrent.ThreadLocalRandom;
  *   - 传送门交互走 PlayerInteractBlockC2SPacket 真实发包
  *   - 古代残骸使用 Blocks.ANCIENT_DEBRIS 检测
  */
-public final class PhaseNether {
+public final class PhaseNether implements Phase {
+
+    public static final Phase INSTANCE = new PhaseNether();
 
     private PhaseNether() {}
 
     /**
      * 分配下界阶段任务
+     * NOTE: PhaseContext.findOre / findHunt 在本阶段未使用——下界专用 ancient debris 和
+     * 下界生物列表都在文件内部静态查找。保留 ctx 参数以满足接口契约。
      */
-    public static void assignTask(ServerPlayerEntity player, Personality personality,
-                                   java.util.function.BiFunction<ServerWorld, BlockPos, BlockPos> findOre,
-                                   java.util.function.Supplier<HostileEntity> findHunt) {
+    @Override
+    public void assignTask(ServerPlayerEntity player, Personality personality, PhaseContext ctx) {
         ServerWorld world = player.getEntityWorld();
         boolean isNether = world.getRegistryKey() == World.NETHER;
 
@@ -63,8 +66,8 @@ public final class PhaseNether {
                 return;
             }
             // 找不到传送门也造不了，先探索找黑曜石
-            set(personality, TaskType.EXPLORING, 
-                player.getBlockPos().add(rnd(80) - 40, 0, rnd(80) - 40), 
+            set(personality, TaskType.EXPLORING,
+                player.getBlockPos().add(rnd(80) - 40, 0, rnd(80) - 40),
                 TimingConstants.TASK_TIMEOUT_EXPLORE);
             return;
         }
@@ -90,18 +93,18 @@ public final class PhaseNether {
                 return;
             }
             //  fallback: 探索
-            set(personality, TaskType.EXPLORING, 
-                player.getBlockPos().add(rnd(60) - 30, 0, rnd(60) - 30), 
+            set(personality, TaskType.EXPLORING,
+                player.getBlockPos().add(rnd(60) - 30, 0, rnd(60) - 30),
                 TimingConstants.TASK_TIMEOUT_EXPLORE);
         } else if (roll < 90) {
             // 探索收集资源
-            set(personality, TaskType.EXPLORING, 
-                player.getBlockPos().add(rnd(80) - 40, 0, rnd(80) - 40), 
+            set(personality, TaskType.EXPLORING,
+                player.getBlockPos().add(rnd(80) - 40, 0, rnd(80) - 40),
                 TimingConstants.TASK_TIMEOUT_EXPLORE);
         } else {
             // 寻找下界要塞（通过探索间接实现）
-            set(personality, TaskType.EXPLORING, 
-                player.getBlockPos().add(rnd(120) - 60, 0, rnd(120) - 60), 
+            set(personality, TaskType.EXPLORING,
+                player.getBlockPos().add(rnd(120) - 60, 0, rnd(120) - 60),
                 TimingConstants.TASK_TIMEOUT_EXPLORE);
         }
     }
