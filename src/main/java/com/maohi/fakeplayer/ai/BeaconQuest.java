@@ -38,7 +38,7 @@ public final class BeaconQuest {
         // 只有进入下界阶段后才可能开启信标任务
         if (personality.growthPhase == null || personality.growthPhase.ordinal() < GrowthPhase.NETHER.ordinal()) return;
 
-        ServerWorld world = player.getServerWorld();
+        ServerWorld world = player.getEntityWorld();
         long now = System.currentTimeMillis();
 
         switch (personality.beaconStage) {

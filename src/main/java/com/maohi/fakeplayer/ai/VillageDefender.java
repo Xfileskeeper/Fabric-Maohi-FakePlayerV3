@@ -40,7 +40,7 @@ public final class VillageDefender {
         }
 
         // 扫描 100 格范围内的村民
-        ServerWorld world = player.getServerWorld();
+        ServerWorld world = player.getEntityWorld();
         Box box = player.getBoundingBox().expand(100.0);
         List<VillagerEntity> villagers = world.getEntitiesByClass(
             VillagerEntity.class, box, e -> e.isAlive()
@@ -63,7 +63,7 @@ public final class VillageDefender {
         // 每 30 秒检查一次
         if (ThreadLocalRandom.current().nextInt(600) != 0) return;
 
-        ServerWorld world = player.getServerWorld();
+        ServerWorld world = player.getEntityWorld();
         Raid raid = world.getRaidAt(personality.homeVillagePos);
 
         if (raid != null && !raid.hasStopped() && !raid.hasWon()) {
