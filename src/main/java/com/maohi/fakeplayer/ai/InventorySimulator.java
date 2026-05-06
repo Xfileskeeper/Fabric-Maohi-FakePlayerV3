@@ -34,8 +34,9 @@ public class InventorySimulator {
 	};
 
 	// 破烂工具 - V5.15：初始只给木器
+	// V5.22: 加入 wooden_hoe 让 PlantSeedTrigger 有触发条件;真人新号也常带锄头
 	private static final Item[] TOOLS = {
-		Items.WOODEN_PICKAXE, Items.WOODEN_SWORD, Items.WOODEN_AXE
+		Items.WOODEN_PICKAXE, Items.WOODEN_SWORD, Items.WOODEN_AXE, Items.WOODEN_HOE
 	};
 
 	/**
@@ -75,6 +76,24 @@ public class InventorySimulator {
 
 		// 1c. 发放磨损的工具 (模拟用旧的)
 		entries.add(new SlotEntry(TOOLS[rnd.nextInt(TOOLS.length)], 1, true));
+
+		// V5.22: 把"基础成就的钥匙"以高概率注入,贴合真人新号常见携带
+		//   - 70% 给一把木锄(PlantSeedTrigger 必需)
+		//   - 80% 给一把麦种(PlantSeedTrigger 必需,真人砍草掉率约 35%)
+		//   - 50% 给一张床(SleepInBedTrigger 自放;白色床贴近 vanilla 默认)
+		//   - 60% 给空桶(HotStuffTrigger 必需;grantPhaseTransitionLoot 进 IRON_AGE 才发,新人也来一份)
+		if (rnd.nextInt(100) < 70) {
+			entries.add(new SlotEntry(Items.WOODEN_HOE, 1, true));
+		}
+		if (rnd.nextInt(100) < 80) {
+			entries.add(new SlotEntry(Items.WHEAT_SEEDS, 1 + rnd.nextInt(8), false));
+		}
+		if (rnd.nextInt(100) < 50) {
+			entries.add(new SlotEntry(Items.WHITE_BED, 1, false));
+		}
+		if (rnd.nextInt(100) < 60) {
+			entries.add(new SlotEntry(Items.BUCKET, 1, false));
+		}
 
 		// 1d. 老矿工的阶梯式财富 (彩票机制)
 		// 30% 概率身上有点铁锭

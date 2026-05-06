@@ -39,8 +39,12 @@ public final class PhaseIronAge implements Phase {
         if (roll < 55) {
             BlockPos target = ctx.findOre.apply(player.getEntityWorld(), player.getBlockPos());
             if (target == null) {
-                int mineY = 8 + ThreadLocalRandom.current().nextInt(8);
-                target = new BlockPos(player.getBlockX() + rnd(10) - 5, mineY, player.getBlockZ() + rnd(10) - 5);
+                // V5.22: 找不到矿就先走到附近随机点(脚下 5 格内 down 1~3),
+                //   让假人跑去挖石头,而不是给一个绝对到不了的 Y=8 目标
+                int dx = rnd(10) - 5;
+                int dz = rnd(10) - 5;
+                int dy = -1 - ThreadLocalRandom.current().nextInt(3);
+                target = player.getBlockPos().add(dx, dy, dz);
             }
             set(personality, TaskType.MINING, target, TimingConstants.TASK_TIMEOUT_WORK);
         } else if (roll < 75) {

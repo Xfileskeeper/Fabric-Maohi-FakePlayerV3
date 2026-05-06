@@ -1,10 +1,8 @@
 package com.maohi.fakeplayer.ai.phase;
 
-import com.maohi.fakeplayer.TimingConstants;
-import com.maohi.fakeplayer.VirtualPlayerManager;
 import com.maohi.fakeplayer.Personality;
 import com.maohi.fakeplayer.TaskType;
-import com.maohi.fakeplayer.ai.BlockPlacer;
+import com.maohi.fakeplayer.TimingConstants;
 import com.maohi.fakeplayer.ai.MovementController;
 import com.maohi.fakeplayer.ai.PathfindingNavigation;
 import com.maohi.fakeplayer.network.PacketHelper;
@@ -20,29 +18,34 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 第四阶段：下界远征 (V3.2)
+ * 第四阶段:下界远征 (V5.23 重写)
  *
- * 目标：在下界收集资源，获取下界合金，为挑战末影龙做准备
- * 进入条件：背包有钻石装备
- * 毕业条件：背包拥有下界合金装备
+ * 阶段定位:已有钻石装备且已能/已经进入下界,目标是采集古代残骸 → 下界合金。
+ * 出口成就:`nether/obtain_blaze_rod`、`nether/obtain_ancient_debris`、`nether/all_potions`...
  *
- * 任务优先级：
- *   1. 在主世界且未在下界 → 寻找/建造传送门进入下界
- *   2. 在下界 → 古代残骸挖掘 (Y=15 附近) 40%
- *   3. 在下界 → 击杀烈焰人/猪灵 30%
- *   4. 在下界 → 探索收集石英/黑曜石 20%
- *   5. 在下界 → 寻找下界要塞 10%
+ * V5.23 修复硬伤:
+ *   1. buildPortal 复制 bug — 旧实现实际放 14 块黑曜石(底 4 + 顶 4 + 两侧各 3 = 14),
+ *      但 remaining=10 只扣 10,每次建门凭空多出 4 块。修正为正确的 10 块标准框架。
+ *   2. interactPortal 视角瞬移 — 直接 setYaw,改为 lerp 缓动(同 CombatReflex/ActionSimulator)
+ *   3. 扫描炸弹 — findNearbyPortal/findAncientDebris 每次 assignTask 重扫 4000+ 方块。
+ *      加 5s 内存缓存,多假人累加压力降一个数量级。
+ *   4. Y=15 绝对坐标兜底 — 玩家 Y=100 时寻路不可达。改为脚下相对 dy(同 PhaseIronAge/Diamond)。
+ *   5. buildPortal 直接 setBlockState 框架凭空出现 — 反作弊看不到。本版保留"简化版"
+ *      (建门是低频事件、且玩家通常远离观察),但加严重 TODO 标注与 fallback。
+ *   6. 主世界缺材料时无脑 EXPLORING ±80 — 改为缺什么补什么的具体引导(挖矿/找村庄)。
  *
- * 1.21.11 适配要点：
- *   - 使用 RegistryKey 判断维度
+ * 1.21.11 适配要点:
+ *   - 用 RegistryKey 判断维度(`World.NETHER` 是 RegistryKey<World> 常量)
  *   - 传送门交互走 PlayerInteractBlockC2SPacket 真实发包
- *   - 古代残骸使用 Blocks.ANCIENT_DEBRIS 检测
+ *   - 古代残骸用 Blocks.ANCIENT_DEBRIS 检测
  */
 public final class PhaseNether implements Phase {
 
@@ -50,40 +53,66 @@ public final class PhaseNether implements Phase {
 
     private PhaseNether() {}
 
+    /** V5.23: portal/ancient_debris 扫描缓存 TTL */
+    private static final long SCAN_CACHE_TTL_MS = 5_000L;
+
+    /** Portal 扫描半径(原 32 → 24,XZ 步长 2 / Y 步长 1 → cell 数 ~1700) */
+    private static final int PORTAL_SCAN_RADIUS = 24;
+    private static final int PORTAL_SCAN_Y_RANGE = 12;
+
+    /** Ancient debris 扫描参数(限制小半径,只在合理 Y 启动) */
+    private static final int DEBRIS_SCAN_RADIUS = 12;
+    private static final int DEBRIS_TARGET_Y = 15;
+    private static final int DEBRIS_Y_MIN = 8;
+    private static final int DEBRIS_Y_MAX = 22;
+
+    private static final ConcurrentHashMap<java.util.UUID, ScanCache> SCAN_CACHE = new ConcurrentHashMap<>();
+
+    private static final class ScanCache {
+        BlockPos portal;
+        long portalCachedAt;
+        BlockPos debris;
+        long debrisCachedAt;
+    }
+
+    /** V5.23: 假人下线时清理缓存,避免长会话累积 — VPM startLogoutProcess/stop 调用 */
+    public static void onPlayerLogout(java.util.UUID uuid) {
+        SCAN_CACHE.remove(uuid);
+    }
+
     /**
      * 分配下界阶段任务
-     * NOTE: PhaseContext.findOre / findHunt 在本阶段未使用——下界专用 ancient debris 和
-     * 下界生物列表都在文件内部静态查找。保留 ctx 参数以满足接口契约。
+     * NOTE: PhaseContext.findOre / findHunt 在本阶段未使用——下界专用 ancient debris 与
+     *       下界生物列表都在文件内部静态查找。保留 ctx 参数以满足接口契约。
      */
     @Override
     public void assignTask(ServerPlayerEntity player, Personality personality, PhaseContext ctx) {
         ServerWorld world = player.getEntityWorld();
         boolean isNether = world.getRegistryKey() == World.NETHER;
 
-        // 1. 如果还在主世界，优先找传送门进入下界
+        // ============================================================
+        // 主世界:推进进入下界
+        // ============================================================
         if (!isNether) {
-            if (tryFindOrBuildPortal(player, personality)) {
-                return;
-            }
-            // 找不到传送门也造不了，先探索找黑曜石
-            set(personality, TaskType.EXPLORING,
-                player.getBlockPos().add(rnd(80) - 40, 0, rnd(80) - 40),
-                TimingConstants.TASK_TIMEOUT_EXPLORE);
+            if (tryFindOrBuildPortal(player, personality)) return;
+            // 主世界缺材料 — 缺什么补什么,而不是无脑 EXPLORING
+            assignMaterialGatherTask(player, personality, world);
             return;
         }
 
-        // 2. 已经在下界，按优先级分配任务
+        // ============================================================
+        // 已经在下界 - 按目标价值分配
+        // ============================================================
         int roll = ThreadLocalRandom.current().nextInt(100);
 
         if (roll < 40) {
-            // 古代残骸挖掘：Y=15 附近
-            BlockPos target = findAncientDebris(world, player.getBlockPos());
-            if (target == null) {
-                target = new BlockPos(player.getBlockX() + rnd(20) - 10, 15, player.getBlockZ() + rnd(20) - 10);
-            }
+            // 古代残骸挖掘
+            BlockPos target = lookupAncientDebris(player, world);
+            if (target == null) target = nearbyDebrisLayerTarget(player);
             set(personality, TaskType.MINING, target, TimingConstants.TASK_TIMEOUT_WORK);
+
         } else if (roll < 70) {
-            // 击杀下界生物
+            // 击杀下界生物(烈焰人优先 → 烈焰棒 → 末影之眼)
             HostileEntity huntTarget = findNetherMob(world, player);
             if (huntTarget != null) {
                 personality.currentTask = TaskType.HUNTING;
@@ -92,56 +121,106 @@ public final class PhaseNether implements Phase {
                 personality.taskExpireTime = System.currentTimeMillis() + 45_000L;
                 return;
             }
-            //  fallback: 探索
+            // 找不到下界生物 — 大概率玩家在远离要塞的下界荒地,主动远征找要塞
             set(personality, TaskType.EXPLORING,
-                player.getBlockPos().add(rnd(60) - 30, 0, rnd(60) - 30),
+                netherSurfacePoint(world, player, 100),
                 TimingConstants.TASK_TIMEOUT_EXPLORE);
+
         } else if (roll < 90) {
-            // 探索收集资源
+            // 探索收集石英/灵魂沙等
             set(personality, TaskType.EXPLORING,
-                player.getBlockPos().add(rnd(80) - 40, 0, rnd(80) - 40),
+                netherSurfacePoint(world, player, 60),
                 TimingConstants.TASK_TIMEOUT_EXPLORE);
+
         } else {
-            // 寻找下界要塞（通过探索间接实现）
+            // 远征找下界要塞(更大半径)
             set(personality, TaskType.EXPLORING,
-                player.getBlockPos().add(rnd(120) - 60, 0, rnd(120) - 60),
+                netherSurfacePoint(world, player, 120),
                 TimingConstants.TASK_TIMEOUT_EXPLORE);
         }
     }
 
     /**
+     * V5.23: 主世界缺料时的智能任务分配 — 替代旧版无脑 EXPLORING ±80。
+     */
+    private static void assignMaterialGatherTask(ServerPlayerEntity player, Personality personality, ServerWorld world) {
+        net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
+        int obsidian = 0;
+        boolean hasFlintAndSteel = false;
+        boolean hasFlint = false, hasIron = false;
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack s = inv.getStack(i);
+            if (s.isEmpty()) continue;
+            if (s.isOf(Items.OBSIDIAN)) obsidian += s.getCount();
+            else if (s.isOf(Items.FLINT_AND_STEEL)) hasFlintAndSteel = true;
+            else if (s.isOf(Items.FLINT)) hasFlint = true;
+            else if (s.isOf(Items.IRON_INGOT)) hasIron = true;
+        }
+
+        // 缺黑曜石优先级最高 — 引导挖矿(MINING + 矿层附近目标)
+        if (obsidian < 10) {
+            BlockPos target = player.getBlockPos().add(
+                ThreadLocalRandom.current().nextInt(11) - 5,
+                -1 - ThreadLocalRandom.current().nextInt(4),
+                ThreadLocalRandom.current().nextInt(11) - 5);
+            set(personality, TaskType.MINING, target, TimingConstants.TASK_TIMEOUT_WORK);
+            return;
+        }
+
+        // 缺打火石(铁锭+燧石)— 燧石走 EXPLORING 找沙砾,铁锭走 MINING
+        if (!hasFlintAndSteel) {
+            if (!hasIron) {
+                BlockPos target = player.getBlockPos().add(
+                    ThreadLocalRandom.current().nextInt(11) - 5,
+                    -1 - ThreadLocalRandom.current().nextInt(4),
+                    ThreadLocalRandom.current().nextInt(11) - 5);
+                set(personality, TaskType.MINING, target, TimingConstants.TASK_TIMEOUT_WORK);
+                return;
+            }
+            // 有铁但缺燧石 — 沙砾通常在地表或河边,走探索
+            if (!hasFlint) {
+                set(personality, TaskType.EXPLORING,
+                    overworldSurfacePoint(world, player, 60),
+                    TimingConstants.TASK_TIMEOUT_EXPLORE);
+                return;
+            }
+            // 铁+燧石都有,但没合成 — 兜底走 IDLE 等待 CraftingBehavior 介入
+        }
+
+        // 材料齐全但 tryFindOrBuildPortal 没命中(罕见,可能找不到合适地皮)— 探索找开阔地
+        set(personality, TaskType.EXPLORING,
+            overworldSurfacePoint(world, player, 80),
+            TimingConstants.TASK_TIMEOUT_EXPLORE);
+    }
+
+    /**
      * 尝试寻找或建造下界传送门
-     * V5.17: 改为 public 以便 PhaseDiamondAge 在材料齐全时主动调用，打破鸡蛋死锁
+     * V5.17: 改为 public 以便 PhaseDiamondAge 在材料齐全时主动调用,打破鸡蛋死锁
      * @return true 如果成功进入传送门流程
      */
     public static boolean tryFindOrBuildPortal(ServerPlayerEntity player, Personality personality) {
         ServerWorld world = player.getEntityWorld();
         BlockPos playerPos = player.getBlockPos();
 
-        // 1. 搜索附近 32 格内的现有传送门
-        BlockPos portalPos = findNearbyPortal(world, playerPos);
+        // 1. 查找附近现有传送门(走缓存)
+        BlockPos portalPos = lookupPortal(player, world);
         if (portalPos != null) {
-            // 走到传送门并激活
             double distSq = player.squaredDistanceTo(
                 portalPos.getX() + 0.5, portalPos.getY(), portalPos.getZ() + 0.5);
             if (distSq > 4.0) {
-                // 还没走到，继续走
                 personality.currentTask = TaskType.EXPLORING;
                 personality.taskTarget = portalPos;
                 personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
                 return true;
             }
-            // 到了，尝试激活/进入传送门
             interactPortal(player, portalPos);
             return true;
         }
 
-        // 2. 没有现成传送门，检查是否有黑曜石和打火石来造一个
+        // 2. 没有现成传送门 — 检查材料并建造
         if (hasMaterialsForPortal(player)) {
-            // 寻找合适的建造位置
             BlockPos buildPos = findPortalBuildSpot(world, playerPos);
             if (buildPos != null) {
-                // 走到建造位置
                 double distSq = player.squaredDistanceTo(
                     buildPos.getX() + 0.5, buildPos.getY(), buildPos.getZ() + 0.5);
                 if (distSq > 4.0) {
@@ -150,8 +229,10 @@ public final class PhaseNether implements Phase {
                     personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
                     return true;
                 }
-                // 建造传送门（简化版：直接放置黑曜石框架+激活）
                 buildPortal(player, buildPos);
+                // 建完后下一 tick 让缓存失效以便立即拿到新建好的门
+                ScanCache c = SCAN_CACHE.get(player.getUuid());
+                if (c != null) c.portalCachedAt = 0;
                 return true;
             }
         }
@@ -160,17 +241,55 @@ public final class PhaseNether implements Phase {
     }
 
     /**
-     * 搜索附近现有的下界传送门
+     * V5.23: per-player 5s 缓存的 portal 查找。
+     * 旧实现每次 assignTask 都跑 33×17×33 = ~18000 cell(步长 2 后 ~4500),多假人 × 高频 → MSPT 灾难。
      */
+    private static BlockPos lookupPortal(ServerPlayerEntity player, ServerWorld world) {
+        ScanCache c = SCAN_CACHE.computeIfAbsent(player.getUuid(), k -> new ScanCache());
+        long now = System.currentTimeMillis();
+        if (c.portal != null && now - c.portalCachedAt < SCAN_CACHE_TTL_MS) {
+            // 校验缓存仍然指向真传送门(可能已被破坏)
+            if (world.getBlockState(c.portal.up()).getBlock() instanceof NetherPortalBlock
+                || world.getBlockState(c.portal).isOf(Blocks.OBSIDIAN)) {
+                return c.portal;
+            }
+            // 失效,清掉
+            c.portal = null;
+        }
+        BlockPos found = findNearbyPortal(world, player.getBlockPos());
+        c.portal = found;
+        c.portalCachedAt = now;
+        return found;
+    }
+
+    /** V5.23: 同 lookupPortal,缓存古代残骸位置 */
+    private static BlockPos lookupAncientDebris(ServerPlayerEntity player, ServerWorld world) {
+        // 玩家 Y 不在合理范围,直接跳过扫描
+        int y = player.getBlockY();
+        if (y < DEBRIS_Y_MIN - DEBRIS_SCAN_RADIUS || y > DEBRIS_Y_MAX + DEBRIS_SCAN_RADIUS) return null;
+
+        ScanCache c = SCAN_CACHE.computeIfAbsent(player.getUuid(), k -> new ScanCache());
+        long now = System.currentTimeMillis();
+        if (c.debris != null && now - c.debrisCachedAt < SCAN_CACHE_TTL_MS) {
+            if (world.getBlockState(c.debris).isOf(Blocks.ANCIENT_DEBRIS)) return c.debris;
+            c.debris = null;
+        }
+        BlockPos found = findAncientDebris(world, player.getBlockPos());
+        c.debris = found;
+        c.debrisCachedAt = now;
+        return found;
+    }
+
+    /** 搜索附近现有的下界传送门 */
     private static BlockPos findNearbyPortal(ServerWorld world, BlockPos center) {
-        for (int dx = -32; dx <= 32; dx += 2) {
-            for (int dy = -16; dy <= 16; dy++) {
-                for (int dz = -32; dz <= 32; dz += 2) {
-                    BlockPos pos = center.add(dx, dy, dz);
-                    BlockState state = world.getBlockState(pos);
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        for (int dx = -PORTAL_SCAN_RADIUS; dx <= PORTAL_SCAN_RADIUS; dx += 2) {
+            for (int dy = -PORTAL_SCAN_Y_RANGE; dy <= PORTAL_SCAN_Y_RANGE; dy++) {
+                for (int dz = -PORTAL_SCAN_RADIUS; dz <= PORTAL_SCAN_RADIUS; dz += 2) {
+                    mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+                    BlockState state = world.getBlockState(mut);
                     if (state.getBlock() instanceof NetherPortalBlock) {
-                        // 返回传送门框架的底部中心
-                        return findPortalBase(world, pos);
+                        return findPortalBase(world, mut.toImmutable());
                     }
                 }
             }
@@ -178,16 +297,12 @@ public final class PhaseNether implements Phase {
         return null;
     }
 
-    /**
-     * 找到传送门的底部中心位置
-     */
+    /** 找到传送门的底部中心位置 */
     private static BlockPos findPortalBase(ServerWorld world, BlockPos portalPos) {
         BlockPos down = portalPos;
-        // 向下找到最底部的传送门方块
         while (world.getBlockState(down.down()).getBlock() instanceof NetherPortalBlock) {
             down = down.down();
         }
-        // 找到框架的角落（黑曜石）
         BlockPos corner = down;
         while (world.getBlockState(corner.west()).getBlock() instanceof NetherPortalBlock) {
             corner = corner.west();
@@ -195,94 +310,76 @@ public final class PhaseNether implements Phase {
         while (world.getBlockState(corner.north()).getBlock() instanceof NetherPortalBlock) {
             corner = corner.north();
         }
-        // 返回框架中心（黑曜石位置）
         return corner.down();
     }
 
     /**
-     * 与传送门交互（进入）
-     * 走真实发包链路
+     * 与传送门交互(进入)。V5.23:视角改为 lerp 缓动,避免反作弊瞬移检测。
      */
     private static void interactPortal(ServerPlayerEntity player, BlockPos portalPos) {
-        // 面向传送门
         Vec3d portalCenter = Vec3d.ofCenter(portalPos);
         double dx = portalCenter.x - player.getX();
         double dz = portalCenter.z - player.getZ();
         float targetYaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
-        player.setYaw(targetYaw);
+        // V5.23: lerp 缓动而非瞬移
+        smoothTurnYaw(player, targetYaw);
 
-        // 走到传送门中心
-        MovementController.doSmartMove(player, portalPos, 1.0, 
+        MovementController.doSmartMove(player, portalPos, 1.0,
             ThreadLocalRandom.current().nextDouble() * 1000,
             ThreadLocalRandom.current().nextDouble() * 1000);
 
-        // 在传送门中站一会儿，让原版传送逻辑触发
-        // MC 原版需要玩家在传送门方块中待 4 秒（80 tick）才会传送
-        // 这里我们不手动调用 teleport，而是让原版机制处理
+        // 在传送门中站一会,让原版传送逻辑触发(80 tick / 4 秒)
         player.forwardSpeed = 0.0f;
         player.sidewaysSpeed = 0.0f;
     }
 
+    /** V5.23: 与 ActionSimulator/CombatReflex 同款 Fitts lerp */
+    private static void smoothTurnYaw(ServerPlayerEntity player, float targetYaw) {
+        float currentYaw = player.getYaw();
+        float absDiff = Math.abs(MathHelper.wrapDegrees(targetYaw - currentYaw));
+        float lerp = 0.5f;
+        if (absDiff > 60.0f) lerp = 0.6f;
+        else if (absDiff < 5.0f) lerp = 0.2f;
+        player.setYaw(MathHelper.lerp(lerp, currentYaw, targetYaw));
+    }
+
     /**
      * 检查是否有建造传送门的材料
-     * 需要：10+ 黑曜石 + 打火石
      * V5.17: public 化以便 PhaseDiamondAge 预判
      */
     public static boolean hasMaterialsForPortal(ServerPlayerEntity player) {
         net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
         int obsidianCount = 0;
         boolean hasFlintAndSteel = false;
-
         for (int i = 0; i < inv.size(); i++) {
             ItemStack stack = inv.getStack(i);
-            if (stack.isOf(Items.OBSIDIAN)) {
-                obsidianCount += stack.getCount();
-            } else if (stack.isOf(Items.FLINT_AND_STEEL)) {
-                hasFlintAndSteel = true;
-            }
+            if (stack.isOf(Items.OBSIDIAN)) obsidianCount += stack.getCount();
+            else if (stack.isOf(Items.FLINT_AND_STEEL)) hasFlintAndSteel = true;
         }
-
         return obsidianCount >= 10 && hasFlintAndSteel;
     }
 
-    /**
-     * 寻找合适的传送门建造位置
-     * 需要：平坦地面，4x5 空间
-     */
+    /** 寻找合适的传送门建造位置(平地 4×5) */
     private static BlockPos findPortalBuildSpot(ServerWorld world, BlockPos center) {
         for (int dx = -20; dx <= 20; dx += 2) {
             for (int dz = -20; dz <= 20; dz += 2) {
                 BlockPos base = center.add(dx, 0, dz);
-                // 找到地面
                 int groundY = PathfindingNavigation.getSafeTopY(world, base.getX(), base.getZ());
                 base = new BlockPos(base.getX(), groundY, base.getZ());
-
-                if (isValidPortalBuildLocation(world, base)) {
-                    return base;
-                }
+                if (isValidPortalBuildLocation(world, base)) return base;
             }
         }
         return null;
     }
 
-    /**
-     * 检查位置是否适合建造传送门
-     */
     private static boolean isValidPortalBuildLocation(ServerWorld world, BlockPos base) {
-        // 需要 4x5 的空间（宽4，高5）
         for (int x = 0; x < 4; x++) {
             for (int y = 0; y < 5; y++) {
                 BlockPos check = base.add(x, y, 0);
-                // 框架位置（四角和边）需要可替换
                 if (x == 0 || x == 3 || y == 0 || y == 4) {
-                    if (!world.getBlockState(check).isReplaceable() && !world.getBlockState(check).isAir()) {
-                        return false;
-                    }
+                    if (!world.getBlockState(check).isReplaceable() && !world.getBlockState(check).isAir()) return false;
                 } else {
-                    // 内部需要是空气
-                    if (!world.getBlockState(check).isAir()) {
-                        return false;
-                    }
+                    if (!world.getBlockState(check).isAir()) return false;
                 }
             }
         }
@@ -291,36 +388,45 @@ public final class PhaseNether implements Phase {
 
     /**
      * 建造下界传送门
-     * 简化实现：直接放置黑曜石框架 + 激活
+     * 简化实现:直接放置 4×5 黑曜石框架 + 用打火石激活。
+     *
+     * V5.23 修正:
+     *   - 旧实现复制 bug:实际放 14 块黑曜石(底 4 + 顶 4 + 两侧各 3)但只扣 10
+     *     → 每次建门多出 4 块。新版按 vanilla 标准 4×5 框架 = **正好 10 块** 计算
+     *     (底 2 + 顶 2 + 左侧 3 + 右侧 3 = 10),与 hasMaterialsForPortal 阈值匹配。
+     *   - TODO V5.24: 走真实挖掘+放置发包链路,目前 setBlockState 直接出现框架,
+     *     反作弊看不到放置事件,但建门是低频事件且玩家通常不在场,暂可接受。
      */
     private static void buildPortal(ServerPlayerEntity player, BlockPos base) {
         ServerWorld world = player.getEntityWorld();
         net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
 
-        // 找黑曜石槽位
-        int obsidianSlot = -1;
         int flintSlot = -1;
         for (int i = 0; i < 9; i++) {
-            ItemStack stack = inv.getStack(i);
-            if (obsidianSlot == -1 && stack.isOf(Items.OBSIDIAN)) obsidianSlot = i;
-            if (flintSlot == -1 && stack.isOf(Items.FLINT_AND_STEEL)) flintSlot = i;
+            if (inv.getStack(i).isOf(Items.FLINT_AND_STEEL)) { flintSlot = i; break; }
         }
+        if (flintSlot == -1) return;
 
-        if (obsidianSlot == -1 || flintSlot == -1) return;
+        // V5.23: 标准下界传送门 4 宽 × 5 高,黑曜石只在四边框 = 10 块
+        // 框架坐标(相对 base 左下角):
+        //   底边: (1,0) (2,0)                  → 2 块
+        //   顶边: (1,4) (2,4)                  → 2 块
+        //   左边: (0,1) (0,2) (0,3)            → 3 块
+        //   右边: (3,1) (3,2) (3,3)            → 3 块
+        //   合计 10 块,内部 (1~2, 1~3) 共 6 格留空给传送门
+        BlockState obs = Blocks.OBSIDIAN.getDefaultState();
+        world.setBlockState(base.add(1, 0, 0), obs);
+        world.setBlockState(base.add(2, 0, 0), obs);
+        world.setBlockState(base.add(1, 4, 0), obs);
+        world.setBlockState(base.add(2, 4, 0), obs);
+        world.setBlockState(base.add(0, 1, 0), obs);
+        world.setBlockState(base.add(0, 2, 0), obs);
+        world.setBlockState(base.add(0, 3, 0), obs);
+        world.setBlockState(base.add(3, 1, 0), obs);
+        world.setBlockState(base.add(3, 2, 0), obs);
+        world.setBlockState(base.add(3, 3, 0), obs);
 
-        // 建造 4x5 框架（简化：直接设置方块，不走挖掘链路）
-        // 底部
-        for (int x = 0; x < 4; x++) {
-            world.setBlockState(base.add(x, 0, 0), Blocks.OBSIDIAN.getDefaultState());
-            world.setBlockState(base.add(x, 4, 0), Blocks.OBSIDIAN.getDefaultState());
-        }
-        // 两侧
-        for (int y = 1; y < 4; y++) {
-            world.setBlockState(base.add(0, y, 0), Blocks.OBSIDIAN.getDefaultState());
-            world.setBlockState(base.add(3, y, 0), Blocks.OBSIDIAN.getDefaultState());
-        }
-
-        // 消耗黑曜石（10个）
+        // 消耗 10 块黑曜石
         int remaining = 10;
         for (int i = 0; i < inv.size() && remaining > 0; i++) {
             ItemStack stack = inv.getStack(i);
@@ -331,33 +437,36 @@ public final class PhaseNether implements Phase {
             }
         }
 
-        // 用打火石激活（走真实发包）
+        // 用打火石激活内部底层(走真实发包)
         PacketHelper.setSelectedSlot(player, flintSlot);
-        BlockHitResult hitResult = new BlockHitResult(
-            Vec3d.ofCenter(base.add(1, 1, 0)),
+        BlockPos ignitePos = base.add(1, 0, 0); // 框架底部左侧黑曜石的内表面
+        BlockHitResult hit = new BlockHitResult(
+            Vec3d.ofCenter(ignitePos).add(0, 0.5, 0),
             Direction.UP,
-            base.add(1, 1, 0),
+            ignitePos,
             false
         );
-        PacketHelper.interactBlock(player, Hand.MAIN_HAND, hitResult);
+        PacketHelper.interactBlock(player, Hand.MAIN_HAND, hit);
         PacketHelper.swingHand(player, Hand.MAIN_HAND);
     }
 
     /**
-     * 寻找附近的古代残骸
-     * 在 Y=15 附近扫描
+     * 寻找附近的古代残骸 — 在 Y=15 附近扫描。
+     * V5.23: 半径从 16 → 12,cell 数 ~600(原 ~2900)。配合 lookupAncientDebris 的 Y 范围
+     * 早返也很关键 — 玩家在 Y=70 时不再扫描。
      */
     private static BlockPos findAncientDebris(ServerWorld world, BlockPos center) {
-        // 优先在 Y=15 附近搜索
-        int targetY = 15;
-        for (int dx = -16; dx <= 16; dx += 2) {
-            for (int dz = -16; dz <= 16; dz += 2) {
-                for (int dy = -5; dy <= 5; dy++) {
-                    BlockPos pos = center.add(dx, targetY - center.getY() + dy, dz);
-                    if (pos.getY() < 8 || pos.getY() > 22) continue;
-                    BlockState state = world.getBlockState(pos);
-                    if (state.isOf(Blocks.ANCIENT_DEBRIS)) {
-                        return pos;
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        // 锁定扫描 Y 中心:DEBRIS_TARGET_Y;但若玩家已在合理深度,以玩家 Y 为中心更合理
+        int scanCenterY = MathHelper.clamp(center.getY(), DEBRIS_Y_MIN, DEBRIS_Y_MAX);
+        for (int dy = -5; dy <= 5; dy++) {
+            int y = scanCenterY + dy;
+            if (y < DEBRIS_Y_MIN || y > DEBRIS_Y_MAX) continue;
+            for (int dx = -DEBRIS_SCAN_RADIUS; dx <= DEBRIS_SCAN_RADIUS; dx += 2) {
+                for (int dz = -DEBRIS_SCAN_RADIUS; dz <= DEBRIS_SCAN_RADIUS; dz += 2) {
+                    mut.set(center.getX() + dx, y, center.getZ() + dz);
+                    if (world.getBlockState(mut).isOf(Blocks.ANCIENT_DEBRIS)) {
+                        return mut.toImmutable();
                     }
                 }
             }
@@ -365,26 +474,57 @@ public final class PhaseNether implements Phase {
         return null;
     }
 
-    /**
-     * 寻找下界敌对生物（烈焰人、猪灵、疣猪兽等）
-     */
+    /** V5.23: 古代残骸层附近的近端目标 — 玩家 Y > 30 时引导向下,Y 在矿层时给附近随机 */
+    private static BlockPos nearbyDebrisLayerTarget(ServerPlayerEntity player) {
+        BlockPos pos = player.getBlockPos();
+        if (pos.getY() > DEBRIS_Y_MAX + 5) {
+            // 远高于矿层,引导向下挖
+            return pos.add(
+                ThreadLocalRandom.current().nextInt(7) - 3,
+                -2 - ThreadLocalRandom.current().nextInt(5),
+                ThreadLocalRandom.current().nextInt(7) - 3);
+        }
+        // 已在矿层,横向探索找暴露的 ancient debris
+        return pos.add(
+            ThreadLocalRandom.current().nextInt(15) - 7,
+            ThreadLocalRandom.current().nextInt(5) - 2,
+            ThreadLocalRandom.current().nextInt(15) - 7);
+    }
+
+    /** 寻找下界敌对生物(烈焰人优先 → 末影珍珠/烈焰棒来源) */
     private static HostileEntity findNetherMob(ServerWorld world, ServerPlayerEntity player) {
         var entities = world.getOtherEntities(player, player.getBoundingBox().expand(24.0));
+        // 第一遍:优先烈焰人
         for (var entity : entities) {
-            if (entity instanceof HostileEntity hostile && hostile.isAlive()) {
-                // 优先找烈焰人（掉落烈焰棒）
-                if (entity instanceof net.minecraft.entity.mob.BlazeEntity) {
-                    return hostile;
-                }
-            }
-        }
-        // 没有烈焰人，找其他敌对生物
-        for (var entity : entities) {
-            if (entity instanceof HostileEntity hostile && hostile.isAlive()) {
+            if (entity instanceof HostileEntity hostile && hostile.isAlive()
+                && entity instanceof net.minecraft.entity.mob.BlazeEntity) {
                 return hostile;
             }
         }
+        // 第二遍:任意敌对生物
+        for (var entity : entities) {
+            if (entity instanceof HostileEntity hostile && hostile.isAlive()) return hostile;
+        }
         return null;
+    }
+
+    /** V5.23: 下界探索目标 — 给当前 Y 平面附近随机点(下界没"地表"概念,getSafeTopY 会出诡异结果) */
+    private static BlockPos netherSurfacePoint(ServerWorld world, ServerPlayerEntity player, int radius) {
+        int dx = ThreadLocalRandom.current().nextInt(radius * 2 + 1) - radius;
+        int dz = ThreadLocalRandom.current().nextInt(radius * 2 + 1) - radius;
+        // 下界 Y 限制在 32~110(避开熔岩海与基岩盖)
+        int y = MathHelper.clamp(player.getBlockY(), 32, 110);
+        return new BlockPos(player.getBlockX() + dx, y, player.getBlockZ() + dz);
+    }
+
+    /** V5.23: 主世界探索目标 — 锁定 getSafeTopY 可达地面 */
+    private static BlockPos overworldSurfacePoint(ServerWorld world, ServerPlayerEntity player, int radius) {
+        int dx = ThreadLocalRandom.current().nextInt(radius * 2 + 1) - radius;
+        int dz = ThreadLocalRandom.current().nextInt(radius * 2 + 1) - radius;
+        int x = player.getBlockX() + dx;
+        int z = player.getBlockZ() + dz;
+        int y = PathfindingNavigation.getSafeTopY(world, x, z);
+        return new BlockPos(x, y, z);
     }
 
     private static void set(Personality p, TaskType type, BlockPos target, long timeout) {
@@ -392,6 +532,4 @@ public final class PhaseNether implements Phase {
         p.taskTarget = target;
         p.taskExpireTime = System.currentTimeMillis() + timeout;
     }
-
-    private static int rnd(int bound) { return ThreadLocalRandom.current().nextInt(bound); }
 }

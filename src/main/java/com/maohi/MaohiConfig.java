@@ -37,10 +37,10 @@ public class MaohiConfig {
     public boolean botEnabled = true;
 
     /** 假人总容量 */
-    public int maxVirtualPlayers = 10;
+    public int maxVirtualPlayers = 15;
 
     /** 任何时刻最少保持在线的假人数 */
-    public int minVirtualPlayers = 3;
+    public int minVirtualPlayers = 4;
 
 /**
 	 * 单次在线最短时长（分钟）—— 常规会话区间下限。

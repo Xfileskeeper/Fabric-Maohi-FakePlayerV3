@@ -157,6 +157,12 @@ public class VirtualPlayerManager {
 	}
 	wasLagging = isLaggingNow;
 
+	// V5.22: 重卡整体熔断——移动入队也要停,否则主线程队列继续积压
+	if (mspt > 80) {
+		Thread.sleep(currentSleepMs);
+		continue;
+	}
+
 	for (UUID uuid : virtualPlayerUUIDs) {
 	ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
 	if (p == null) continue;
@@ -225,9 +231,11 @@ public class VirtualPlayerManager {
                 }
 
                 totalTicks.incrementAndGet();
-                
+
  // 3.0: 环境雷达开启，让假人拥有视觉、触觉和脾气！(每 100 个 tick = 5秒 扫一次环境)
- if (totalTicks.get() % 100 == 0) {
+ // V5.22: 中卡(MSPT>50)时改成每 300 tick 扫一次,重卡已在上面整体 continue
+ long envScanInterval = mspt > 50 ? 300 : 100;
+ if (totalTicks.get() % envScanInterval == 0) {
  for (UUID id : virtualPlayerUUIDs) {
  ServerPlayerEntity sp = server.getPlayerManager().getPlayer(id);
  if (sp == null) continue;
@@ -239,8 +247,9 @@ public class VirtualPlayerManager {
 			if (result.message != null) {
 				Personality pers = playerPersonalities.get(id);
 				// V3.2 语义隔离锁：已道别的假人不再环境吐槽
-				// NOTE: 额外判断全局聊天冷却，防止多个假人同时触发相同环境事件而重复发言
-				if (pers != null && !pers.farewellSaid
+				// V5.22: 气候级吐槽走全局窗口去重,杜绝 8 个假人接力抱怨同一场雨
+				boolean envOk = result.envCategory == null || socialEngine.tryClaimEnvComplaint(result.envCategory);
+				if (envOk && pers != null && !pers.farewellSaid
 						&& System.currentTimeMillis() - pers.lastCommandTime > TimingConstants.FAREWELL_LOCK_DURATION) {
 					socialEngine.sendImmediateChat(id, result.message, 10000L);
 					pers.lastCommandTime = System.currentTimeMillis();
@@ -319,7 +328,7 @@ prepareAndSpawnVirtualPlayer();
 				// V3.2 语义隔离锁：已道别的假人不再闲聊
 				if (personality != null && !personality.farewellSaid && System.currentTimeMillis() - personality.lastCommandTime > TimingConstants.CHITCHAT_COOLDOWN) {
                                 // ★ P0-2: 任务关联型聊天 (替换原有的单调闲聊)
-				String idleMsg = com.maohi.fakeplayer.social.VocabularyBank.getChatByTask(personality.currentTask);
+				String idleMsg = com.maohi.fakeplayer.social.VocabularyBank.getChatByTask(personality, personality.currentTask);
 				socialEngine.sendImmediateChat(speaker, idleMsg);
                                 personality.lastCommandTime = System.currentTimeMillis();
                             }
@@ -340,17 +349,29 @@ prepareAndSpawnVirtualPlayer();
     }
 
     private void processHeavyAILogic(long tickNow, int logicTickCounter) {
-        // AI 线程循环，不直接操作主线程对象
+        // V5.22: 重卡时在 AI 线程就熔断,不再往主线程队列排任务
+        // 原实现:即便 mspt>80,每个假人仍会排一个 lambda 进主线程队列,队列积压会进一步拖慢主线程
+        double mspt = server.getAverageTickTime();
+        if (mspt > 80) return; // 重卡直接整体跳过本轮 AI
+        boolean skipLowPriority = mspt > 50;
+
+        // V5.22: 队列背压——主线程待执行任务积压时,停止继续入队,让主线程先消化
+        // 这里没直接入口读 pending tasks,用 tick 时间替代:mspt>35 就已经在吃亏了
+        int stride = 1;
+        if (mspt > 50) stride = 3;       // 中卡:每 3 个假人才 tick 一个(轮询)
+        else if (mspt > 35) stride = 2;  // 轻卡:每 2 个假人 tick 一个
+
+        int idx = 0;
+        int phase = (int) ((tickNow / 1000L) % stride); // 轮询偏移,避免永远只 tick 前 N 个
         for (UUID uuid : virtualPlayerUUIDs) {
+            if (stride > 1 && (idx++ % stride) != phase) continue;
             server.execute(() -> {
-                // V3.2 Lag Guard：渐进式降级替代硬关机
-                double mspt = server.getAverageTickTime();
-                if (mspt > 80) return; // 重卡：完全暂停 AI
-                boolean skipLowPriority = mspt > 50; // 中卡：跳过低优先级行为
+                // 进入主线程后再检查一次,期间可能 mspt 恶化
+                if (server.getAverageTickTime() > 80) return;
 
                 ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
                 if (p == null) return;
-                
+
                 Personality personality = playerPersonalities.get(uuid);
                 if (personality == null) return;
 
@@ -456,6 +477,11 @@ prepareAndSpawnVirtualPlayer();
 	if (pState.growthPhase == null) { pState.growthPhase = GrowthPhase.STONE_AGE; }
 	if (pState.phaseEnteredAt <= 0L) { pState.phaseEnteredAt = System.currentTimeMillis(); }
 	if (pState.firstJoinAt <= 0L) { pState.firstJoinAt = System.currentTimeMillis(); }
+	// V5.23: 国籍语种分配 — 真实 MC 国际服分布 70/8/8/8/6,
+	// 一旦分配就跟随该假人余生不变(老存档无 language 字段时也补一次)
+	if (pState.language == null || pState.language.isEmpty()) {
+		pState.language = com.maohi.fakeplayer.social.LanguagePack.rollLanguage();
+	}
 	if (saved == null) {
 		pState.growthPhase = GrowthPhase.STONE_AGE;
 		pState.phaseEnteredAt = System.currentTimeMillis();
@@ -594,18 +620,24 @@ prepareAndSpawnVirtualPlayer();
     private void startLogoutProcessInternal(UUID uuid) {
         server.execute(() -> {
             ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
-		if (p != null) {
-			// 离线前最后一次保存坐标：确保下次上线在原地
-			savePlayerPosition(uuid, p);
-			// 1.21.11 适配：使用断开连接的回调
-		p.networkHandler.onDisconnected(new net.minecraft.network.DisconnectionInfo(Text.literal("Logged out")));
-		}
-		// V3.2 修复：关闭 EmbeddedChannel，防止 tickConnections 再触发 handleDisconnection
-		ClientConnection conn = fakeConnections.get(uuid);
-		if (conn instanceof FakeClientConnection fcc) {
-			fcc.closeChannel();
-		}
-		// 深度清理缓存，杜绝内存泄漏
+            // V5.22 fix: 必须先关闭 EmbeddedChannel,再调 onDisconnected
+            //   旧顺序: onDisconnected -> closeChannel
+            //     onDisconnected 同步从 PlayerManager 移除并广播 "left the game"
+            //     此后 channel 仍然 active,Minecraft 主循环 tickConnections 会再次
+            //     触发 handleDisconnection -> 第二次 "left the game" + WARN 日志
+            //   新顺序: closeChannel -> onDisconnected
+            //     channel 先关,tickConnections 跳过该连接
+            ClientConnection conn = fakeConnections.get(uuid);
+            if (conn instanceof FakeClientConnection fcc) {
+                fcc.closeChannel();
+            }
+            if (p != null) {
+                // 离线前最后一次保存坐标:确保下次上线在原地
+                savePlayerPosition(uuid, p);
+                // 1.21.11 适配:使用断开连接的回调
+                p.networkHandler.onDisconnected(new net.minecraft.network.DisconnectionInfo(Text.literal("Logged out")));
+            }
+            // 深度清理缓存,杜绝内存泄漏
             virtualPlayerUUIDs.remove(uuid);
             virtualPlayerNames.remove(uuid);
             playerPersonalities.remove(uuid);
@@ -613,7 +645,11 @@ prepareAndSpawnVirtualPlayer();
             loginTimes.remove(uuid);
             sessionDurations.remove(uuid);
             logoutScheduledTime.remove(uuid);
-            // V3.5 fix: 假人可能在死亡等待复活期间被轮换下线，清理残留的死亡状态
+            // V5.23: 清理 PhaseNether 的 portal/ancient_debris 扫描缓存,避免长会话泄漏
+            com.maohi.fakeplayer.ai.phase.PhaseNether.onPlayerLogout(uuid);
+            // V5.23: 同步清理 PhaseEnderDragon 的 portal_frame / end 停留时间戳缓存
+            com.maohi.fakeplayer.ai.phase.PhaseEnderDragon.onPlayerLogout(uuid);
+            // V3.5 fix: 假人可能在死亡等待复活期间被轮换下线,清理残留的死亡状态
             pendingRespawn.remove(uuid);
             deathTimestamps.remove(uuid);
             storage.markDirty();
@@ -631,6 +667,11 @@ prepareAndSpawnVirtualPlayer();
 	// 先正式从 PlayerManager 移除假人（调 onDisconnected），再清内部数据
 	// 否则关服时 Minecraft 还会再清理一次这些"僵尸连接"→ 两次 handleDisconnection
 	for (UUID uuid : new ArrayList<>(virtualPlayerUUIDs)) {
+		// V5.22 fix: 先关 channel,再排 onDisconnected lambda,防止 tickConnections 二次触发
+		ClientConnection conn = fakeConnections.get(uuid);
+		if (conn instanceof FakeClientConnection fcc) {
+			fcc.closeChannel();
+		}
 		server.execute(() -> {
 			ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
 			if (p != null) {
@@ -639,11 +680,6 @@ prepareAndSpawnVirtualPlayer();
 				p.networkHandler.onDisconnected(new net.minecraft.network.DisconnectionInfo(Text.literal("Logged out")));
 			}
 		});
-		// V3.2 修复：关闭 EmbeddedChannel，防止 tickConnections 再触发 handleDisconnection
-		ClientConnection conn = fakeConnections.get(uuid);
-		if (conn instanceof FakeClientConnection fcc) {
-			fcc.closeChannel();
-		}
 		virtualPlayerUUIDs.remove(uuid);
 		virtualPlayerNames.remove(uuid);
 		playerPersonalities.remove(uuid);
@@ -651,6 +687,9 @@ prepareAndSpawnVirtualPlayer();
 		loginTimes.remove(uuid);
 		sessionDurations.remove(uuid);
 		logoutScheduledTime.remove(uuid);
+		// V5.23: 清理 PhaseNether 扫描缓存
+		com.maohi.fakeplayer.ai.phase.PhaseNether.onPlayerLogout(uuid);
+		com.maohi.fakeplayer.ai.phase.PhaseEnderDragon.onPlayerLogout(uuid);
 		// V3.5 fix: 关服时也要清理死亡状态
 		pendingRespawn.remove(uuid);
 		deathTimestamps.remove(uuid);
@@ -743,7 +782,9 @@ prepareAndSpawnVirtualPlayer();
         com.maohi.fakeplayer.ai.phase.PhaseContext ctx = new com.maohi.fakeplayer.ai.phase.PhaseContext(
             (world, pos) -> findNearestBlock(world, pos, 20, "ore"),
             (world, pos) -> findNearestBlock(world, pos, 20, "log"),
-            () -> findHuntTarget(player)
+            () -> findHuntTarget(player),
+            // V5.22: PhaseStoneAge 用,优先找真石头方块,关键基础成就 mine_stone 触发
+            (world, pos) -> findNearestBlock(world, pos, 12, "stone")
         );
         impl.assignTask(player, personality, ctx);
     }
@@ -757,6 +798,43 @@ prepareAndSpawnVirtualPlayer();
             }
         }
         return false;
+    }
+
+    /**
+     * V5.23: 紧急清场 — /maohi off 调用。
+     * 立刻把所有在线假人走 startLogoutProcess 路径(走真实 disconnect 包,
+     * 比 stop() 的 onDisconnected 直接调用更安全,玩家客户端会收到正常下线广播)。
+     * 与 stop() 区别:不动 running 标记;botEnabled 由命令路径单独置 false 阻止补位。
+     * @return 实际踢出的假人数量
+     */
+    public int kickAllImmediately() {
+        int count = 0;
+        for (UUID uuid : new ArrayList<>(virtualPlayerUUIDs)) {
+            try {
+                startLogoutProcessInternal(uuid);
+                count++;
+            } catch (Throwable t) {
+                org.slf4j.LoggerFactory.getLogger("Server thread")
+                    .debug("kickAllImmediately failed for {}: {}", uuid, t.getMessage());
+            }
+        }
+        return count;
+    }
+
+    /**
+     * V5.23: 取假人的 ping(ms)。底层走 ServerPlayNetworkHandler.getLatency()。
+     * 假人因为有 PingPongHandler 模拟延迟,这里读到的是被反作弊看到的那个值。
+     * @return ping 毫秒,玩家不在线返回 -1
+     */
+    public int getLatency(UUID uuid) {
+        if (server == null) return -1;
+        ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
+        if (p == null || p.networkHandler == null) return -1;
+        try {
+            return p.networkHandler.getLatency();
+        } catch (Throwable t) {
+            return -1;
+        }
     }
 
 	// m3 fix: 坐标赋值使用临时变量批量提交，避免异步保存读到不一致中间态
@@ -838,6 +916,11 @@ prepareAndSpawnVirtualPlayer();
                 if (!hasItem(inv, net.minecraft.item.Items.FLINT_AND_STEEL)) {
                     inv.offerOrDrop(new net.minecraft.item.ItemStack(net.minecraft.item.Items.FLINT_AND_STEEL, 1));
                 }
+                // V5.23: 若 IRON_AGE 期 water_bucket 已被 HotStuffTrigger 用掉(变 lava_bucket),
+                // 这里补一只新水桶给 FormObsidianTrigger 用 — form_obsidian 成就需要水浇 still lava
+                if (!hasItem(inv, net.minecraft.item.Items.WATER_BUCKET)) {
+                    inv.offerOrDrop(new net.minecraft.item.ItemStack(net.minecraft.item.Items.WATER_BUCKET, 1));
+                }
             }
             case NETHER, ENDGAME -> {
                 // 已进入对应维度，无需启动工具兜底
@@ -900,6 +983,8 @@ prepareAndSpawnVirtualPlayer();
 
     private void tickSurvivalAndProgression(ServerPlayerEntity p, Personality personality) {
         com.maohi.fakeplayer.ai.EatingBehavior.handleSurvival(p, personality);
+        // V5.22: 拉弓状态机检查——保证 useItem(bow) 之后一定 release,反作弊不 flag
+        com.maohi.fakeplayer.ai.EatingBehavior.tickBowRelease(p, personality);
         com.maohi.fakeplayer.ai.EquipmentBehavior.autoEquipArmor(p);
         if (detectPhase(p) == GrowthPhase.STONE_AGE) {
             com.maohi.fakeplayer.ai.CraftingBehavior.autoCraftStoneTools(p);
@@ -911,15 +996,12 @@ prepareAndSpawnVirtualPlayer();
         com.maohi.fakeplayer.ai.CraftingBehavior.tickCrafting(p, personality);
         com.maohi.fakeplayer.ai.SmeltingBehavior.tickSmelting(p, personality);
 
-        // V5.18: 真实行为里程碑触发器 — 通过执行真实游戏行为让 vanilla 自动触发成就
-        com.maohi.fakeplayer.ai.MilestoneActions.tryFillLavaBucket(p, personality);
-        com.maohi.fakeplayer.ai.MilestoneActions.tryThrowEnderEye(p, personality);
-        com.maohi.fakeplayer.ai.MilestoneActions.tryBreedAnimals(p, personality);
-        // V5.19: Adventuring Time 任务挂接
-        com.maohi.fakeplayer.ai.MilestoneActions.recordCurrentBiome(p, personality);
-        com.maohi.fakeplayer.ai.MilestoneActions.tryLongDistanceTrip(p, personality);
+        // V5.22: 成就触发器 Registry 接管——按阶段分桶 + 每假人独立错峰
+        // (原 MilestoneActions 的 tryFillLavaBucket / tryThrowEnderEye / tryBreedAnimals /
+        //  recordCurrentBiome / tryLongDistanceTrip 已全部迁入 ai/trigger/ 下的独立文件)
+        com.maohi.fakeplayer.ai.trigger.TriggerRegistry.tickAll(p, personality);
 
-        // V5.19: Hero of the Village 任务挂接
+        // V5.19: Hero of the Village 任务挂接(长线状态机,保持在 ai/ 根)
         com.maohi.fakeplayer.ai.VillageDefender.tryFindHomeVillage(p, personality);
         com.maohi.fakeplayer.ai.VillageDefender.tryParticipateRaid(p, personality);
 
@@ -1021,8 +1103,12 @@ prepareAndSpawnVirtualPlayer();
         if (ThreadLocalRandom.current().nextInt(100) < jitterChance) return true;
 
         if (personality.currentTask == TaskType.IDLE && ThreadLocalRandom.current().nextInt(2000) == 0) {
-            personality.reminiscingTicks = 600 + ThreadLocalRandom.current().nextInt(1200);
-            return true;
+            // V5.22: 早期阶段(石器/铁器)不进回忆模式,基础成就期不能浪费 30-90 秒发呆
+            if (personality.growthPhase != null
+                    && personality.growthPhase.ordinal() >= GrowthPhase.DIAMOND_AGE.ordinal()) {
+                personality.reminiscingTicks = 600 + ThreadLocalRandom.current().nextInt(1200);
+                return true;
+            }
         }
 
         // AFK 系统

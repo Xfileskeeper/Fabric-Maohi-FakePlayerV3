@@ -29,34 +29,25 @@ public class PacketHelper {
     // ==================== 1. 攻击实体 ====================
 
     /**
-     * 真实攻击实体：发包 + 调方法 双保险
+     * 真实攻击实体：单一发包路径
      *
-     * 1. 发 PlayerInteractEntityC2SPacket.attack() — 反作弊能看到攻击包
-     * 2. 调 player.attack() — 确保服务端逻辑执行（扣血、掉落、经验）
-     * 3. 发 HandSwingC2SPacket — 反作弊能看到挥手动画包
-     * 4. 重置攻击冷却 — 模拟真人的攻击节奏
+     * V5.22 修复:
+     *   原代码 onPlayerInteractEntity → player.attack() 双调,导致:
+     *     - vanilla 在 onPlayerInteractEntity 内部已执行 attack 逻辑(扣血/掉落/经验)
+     *     - 再调 player.attack() 会二次结算,造成 1 击双倍伤害(可一刀秒 7 血怪)
+     *   现在只走真实客户端发包链路,vanilla 自己处理后续。
      *
-     * 服务端会自动处理：怪物死亡 → 掉落物 + 经验球 → 不需要手动加
+     *   附带:挥手包也由 onPlayerInteractEntity 处理,不再重复发。
      */
     public static void attackEntity(ServerPlayerEntity player, Entity target) {
         if (player == null || target == null || !target.isAlive()) return;
 
-        // 1. 发攻击包（让反作弊看到）
+        // 走真实客户端攻击包链路——vanilla 内部完成攻击 + 挥手 + 冷却重置
         PlayerInteractEntityC2SPacket attackPacket = PlayerInteractEntityC2SPacket.attack(target, player.isSneaking());
         player.networkHandler.onPlayerInteractEntity(attackPacket);
 
-        // 2. 调服务端原生攻击方法（确保逻辑执行）
-        player.attack(target);
-
-        // 3. 发挥手包（真实客户端攻击时会发）
+        // 单独发挥手包让其它玩家看到动画(onPlayerInteractEntity 内部不一定广播挥手)
         player.networkHandler.onHandSwing(new HandSwingC2SPacket(Hand.MAIN_HAND));
-
-        // 4. 重置攻击冷却（模拟真人的攻击节奏）
-        // 1.21.11 适配：官方原生方法名为 resetTicksSinceLastAttack
-        player.resetTicksSinceLastAttack();
-
-        // 5. 挥手动画（让周围玩家看到）
-        player.swingHand(Hand.MAIN_HAND, true);
     }
 
     // ==================== 2. 挖掘方块 ====================
@@ -64,10 +55,9 @@ public class PacketHelper {
     /**
      * 开始挖掘方块：发包通知服务端
      *
-     * 服务端会自动：
-     * - 记录挖掘状态到 ServerPlayerInteractionManager
-     * - 开始计算挖掘进度
-     * - 自动广播裂纹包给周围玩家
+     * V5.22 修复:删除冗余的 player.interactionManager.processBlockBreakingAction 显式调用——
+     *   onPlayerAction 内部已走完整 vanilla 链路(包括 processBlockBreakingAction),
+     *   重复调用会导致 sequence 不一致或挖掘进度错乱。
      */
     public static void startDestroyBlock(ServerPlayerEntity player, BlockPos pos, Direction direction) {
         if (player == null || pos == null) return;
@@ -81,18 +71,8 @@ public class PacketHelper {
         );
         player.networkHandler.onPlayerAction(packet);
 
-        // 同步调 gameMode 方法（双保险）
-        player.interactionManager.processBlockBreakingAction(
-            pos,
-            PlayerActionC2SPacket.Action.START_DESTROY_BLOCK,
-            direction != null ? direction : Direction.NORTH,
-            player.getEntityWorld().getBottomY() + player.getEntityWorld().getHeight() - 1,
-            sequence
-        );
-
         // 发挥手包（开始挖掘时客户端会发）
         player.networkHandler.onHandSwing(new HandSwingC2SPacket(Hand.MAIN_HAND));
-        player.swingHand(Hand.MAIN_HAND, true);
     }
 
     /**
@@ -109,25 +89,16 @@ public class PacketHelper {
             sequence
         );
         player.networkHandler.onPlayerAction(packet);
-
-        player.interactionManager.processBlockBreakingAction(
-            pos,
-            PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK,
-            direction != null ? direction : Direction.NORTH,
-            player.getEntityWorld().getBottomY() + player.getEntityWorld().getHeight() - 1,
-            sequence
-        );
     }
 
     /**
-     * 完成挖掘方块：发包 + 调方法
+     * 完成挖掘方块：单一发包路径
      *
-     * 服务端会自动处理：
-     * - 破坏方块
-     * - 按原版掉落表生成掉落物
-     * - 按原版经验表生成经验球
-     * - 广播方块破坏效果
-     * → 不需要手动 insertStack / addExperience
+     * V5.22 修复同 startDestroyBlock。
+     * vanilla 在 onPlayerAction 内部自动处理:
+     *   - 破坏方块 + 按 vanilla 掉落表生成掉落物
+     *   - 按 vanilla 经验表生成经验球
+     *   - 广播方块破坏效果
      */
     public static void finishDestroyBlock(ServerPlayerEntity player, BlockPos pos, Direction direction) {
         if (player == null || pos == null) return;
@@ -140,14 +111,6 @@ public class PacketHelper {
             sequence
         );
         player.networkHandler.onPlayerAction(packet);
-
-        player.interactionManager.processBlockBreakingAction(
-            pos,
-            PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK,
-            direction != null ? direction : Direction.NORTH,
-            player.getEntityWorld().getBottomY() + player.getEntityWorld().getHeight() - 1,
-            sequence
-        );
     }
 
     // ==================== 3. 使用物品 / 方块交互 ====================
@@ -177,6 +140,11 @@ public class PacketHelper {
 
     /**
      * 释放使用中的物品（停止吃/停止拉弓/射箭）
+     *
+     * V5.22 修复:删除冗余的 processBlockBreakingAction(RELEASE_USE_ITEM) 误用——
+     *   该 action 不归 processBlockBreakingAction 处理,vanilla 在 onPlayerAction 内部
+     *   会正确派发给 stopUsingItem 路径。再调 player.stopUsingItem() 会造成弓箭/食物
+     *   被释放两次,出现箭速过快或食物效果重复结算。
      */
     public static void releaseUseItem(ServerPlayerEntity player) {
         if (player == null) return;
@@ -189,22 +157,14 @@ public class PacketHelper {
             sequence
         );
         player.networkHandler.onPlayerAction(packet);
-
-        // 服务端处理释放
-        player.interactionManager.processBlockBreakingAction(
-            BlockPos.ORIGIN,
-            PlayerActionC2SPacket.Action.RELEASE_USE_ITEM,
-            Direction.DOWN,
-            player.getEntityWorld().getBottomY() + player.getEntityWorld().getHeight() - 1,
-            sequence
-        );
-
-        // 也调原版释放方法（双保险）
-        player.stopUsingItem();
     }
 
     /**
      * 右键交互方块（开门、用床、开箱子等）
+     *
+     * V5.22 修复:只走 onPlayerInteractBlock 发包路径。
+     * 原代码又手动调 interactionManager.interactBlock,会导致一次右键执行两次
+     * (例如床交互/种子种植/桶交互出现双消耗或状态错乱)。
      */
     public static void interactBlock(ServerPlayerEntity player, Hand hand, BlockHitResult hitResult) {
         if (player == null || hitResult == null) return;
@@ -212,15 +172,6 @@ public class PacketHelper {
         int sequence = nextSequence();
         PlayerInteractBlockC2SPacket packet = new PlayerInteractBlockC2SPacket(hand, hitResult, sequence);
         player.networkHandler.onPlayerInteractBlock(packet);
-
-        // 同步调 gameMode 方法
-        player.interactionManager.interactBlock(
-            player,
-            player.getEntityWorld(),
-            player.getStackInHand(hand),
-            hand,
-            hitResult
-        );
     }
 
     // ==================== 4. 快捷栏切换 ====================
@@ -244,11 +195,13 @@ public class PacketHelper {
 
     /**
      * 发挥手包（攻击/挖掘时客户端都会发）
+     *
+     * V5.22 修复:删除手动 player.swingHand() 调用——
+     *   onHandSwing 内部已经调用了 swingHand(hand, true) 并广播到附近玩家,
+     *   再手动调一次会造成挥手动画在客户端帧间出现两次,真人画像不对。
      */
     public static void swingHand(ServerPlayerEntity player, Hand hand) {
         if (player == null) return;
-
         player.networkHandler.onHandSwing(new HandSwingC2SPacket(hand));
-        player.swingHand(hand, true);
     }
 }

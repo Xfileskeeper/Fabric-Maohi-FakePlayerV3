@@ -57,7 +57,13 @@ public final class PhaseStoneAge implements Phase {
 
         // 2. 没有石器且圆石不足 → 挖石头
         if (!hasStoneTools && cobbleCount < 15) {
-            BlockPos target = ctx.findLog.apply(player.getEntityWorld(), player.getBlockPos());
+            // V5.22 fix: 之前用 ctx.findLog 找木头当石头(逻辑错乱),且兜底是脚下 down(2)
+            //   脚下大概率是泥土/草而不是石头,vanilla mine_stone 成就无法触发
+            //   现在改用 ctx.findStone(若可用)→ 兜底再扫地下找石头
+            BlockPos target = ctx.findStone != null
+                ? ctx.findStone.apply(player.getEntityWorld(), player.getBlockPos())
+                : null;
+            if (target == null) target = scanDownForStone(player);
             if (target == null) target = player.getBlockPos().down(2);
             set(personality, TaskType.MINING, target);
             return;
@@ -75,9 +81,31 @@ public final class PhaseStoneAge implements Phase {
             if (target == null) target = player.getBlockPos().add(rnd(40) - 20, 0, rnd(40) - 20);
             set(personality, TaskType.WOODCUTTING, target);
         } else {
-            BlockPos target = player.getBlockPos().down(2);
+            BlockPos target = ctx.findStone != null
+                ? ctx.findStone.apply(player.getEntityWorld(), player.getBlockPos())
+                : null;
+            if (target == null) target = scanDownForStone(player);
+            if (target == null) target = player.getBlockPos().down(2);
             set(personality, TaskType.MINING, target);
         }
+    }
+
+    /**
+     * V5.22: 从脚下向下扫 8 格找真正的 stone/cobblestone/deepslate,
+     * 给 mine_stone 成就一个真实可达的目标。
+     */
+    private static BlockPos scanDownForStone(net.minecraft.server.network.ServerPlayerEntity player) {
+        net.minecraft.server.world.ServerWorld world = player.getEntityWorld();
+        BlockPos start = player.getBlockPos();
+        for (int dy = 1; dy <= 8; dy++) {
+            BlockPos check = start.down(dy);
+            net.minecraft.block.Block b = world.getBlockState(check).getBlock();
+            String id = net.minecraft.registry.Registries.BLOCK.getId(b).getPath();
+            if (id.equals("stone") || id.equals("cobblestone") || id.equals("deepslate") || id.equals("cobbled_deepslate")) {
+                return check;
+            }
+        }
+        return null;
     }
 
     private static void set(Personality p, TaskType type, BlockPos target) {

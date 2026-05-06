@@ -1,5 +1,6 @@
 package com.maohi.fakeplayer.ai;
 
+import com.maohi.fakeplayer.Personality;
 import com.maohi.fakeplayer.VirtualPlayerManager;
 import net.minecraft.entity.Entity;
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -7,28 +8,32 @@ import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.MathHelper;
 
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * 战斗反射系统 (V3)
+ *
+ * V5.22 加固:
+ *   P0 删除 player.attack 双扣血(在 PacketHelper 修)
+ *   P1 strafe/forward 速度走 actionMultiplier,不再硬编码 0.5/0.3
+ *   P2 跳劈概率从 1/3 → 1/15(反作弊不再误判 KillAura)
+ *   P3 setYaw 用 Fitts lerp 替代瞬移
+ *   P4 fleeFrom forwardSpeed 1.0 → 走 actionMultiplier;并加 fleeUntilTick 上限
  */
 public class CombatReflex {
 
-	/** 操作延迟：假人不会"零延迟"反应，模拟 100-300ms 人类反应时间 */
-	private static final int MIN_REACTION_TICKS = 2; // ~100ms
-	private static final int MAX_REACTION_TICKS = 6; // ~300ms
-
-	/** 攻击冷却阈值：只有冷却进度 ≥ 90% 时才攻击（模拟真人的攻击节奏） */
+	/** 攻击冷却阈值:只有冷却进度 ≥ 90% 时才攻击(模拟真人的攻击节奏) */
 	private static final float ATTACK_COOLDOWN_THRESHOLD = 0.9f;
 
-	/** 上次攻击的 tick（per-player，移入 Personality 避免多假人共享冲突） */
-	// NOTE: lastAttackTick 已迁至 com.maohi.fakeplayer.Personality.lastAttackTick
+	/** 苦力怕逃跑最长持续 tick(超过自动放弃,避免无限直线狂奔) */
+	private static final int FLEE_MAX_DURATION_TICKS = 60; // 3 秒
 
 	/**
 	 * 执行战斗扫描与自卫动作
-	 * 
+	 *
 	 * @return true 表示正在逃跑（需要 MovementController 暂停寻路）
 	 */
 	public static boolean executeCombatLogic(ServerPlayerEntity player) {
@@ -37,7 +42,7 @@ public class CombatReflex {
 			player, player.getBoundingBox().expand(12.0)
 		);
 
-		// 2. ★ 自动持盾 (V4.2)：检测远程威胁
+		// 2. 自动持盾(V4.2):检测远程威胁
 		boolean hasShield = player.getOffHandStack().isOf(net.minecraft.item.Items.SHIELD);
 		if (hasShield) {
 			boolean underRangedAttack = false;
@@ -49,57 +54,52 @@ public class CombatReflex {
 					}
 				}
 			}
-			// 被瞄准时自动潜行举盾
 			player.setSneaking(underRangedAttack);
 		}
 
-		// 3. 优先级1：检测苦力怕 → 逃跑
+		// 3. 优先级1:苦力怕逃跑
 		for (Entity entity : entities) {
 			if (entity instanceof CreeperEntity creeper && creeper.isAlive()) {
-				double distSq = player.squaredDistanceTo(creeper);
-				if (distSq < 25.0) {
+				if (player.squaredDistanceTo(creeper) < 25.0) {
 					return fleeFrom(player, creeper);
 				}
 			}
 		}
 
-		// 4. 优先级2：其他敌对生物 → 反击
+		// 4. 优先级2:其他敌对生物 → 反击
+		Personality pers = Personality.get(player);
 		for (Entity entity : entities) {
 			if (entity instanceof HostileEntity hostile && hostile.isAlive()
 				&& !(entity instanceof CreeperEntity)) {
-				
-				// ★ PVP 预判攻击 (V5.0 C)：预测目标 4 tick (0.2s) 后的位置
+
+				// V5.22 P3: PVP 预判 + Fitts 平滑转头(不再瞬移)
 				double predictX = hostile.getX() + hostile.getVelocity().x * 4.0;
 				double predictZ = hostile.getZ() + hostile.getVelocity().z * 4.0;
-				
 				double dx = predictX - player.getX();
 				double dz = predictZ - player.getZ();
 				float targetYaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
-				player.setYaw(targetYaw);
+				smoothTurnYaw(player, targetYaw);
 
-				// ★ 环绕走位 (Strafe)：在战斗中左右横跳
 				if (player.squaredDistanceTo(hostile) < 16.0) {
-					// 随机生成一个侧向速度，模拟左右躲闪
+					// V5.22 P1: strafe/forward 用 actionMultiplier 缩放,贴合真人速度分布
+					float speedMod = pers != null ? pers.actionMultiplier : 1.0f;
 					float strafeDirection = (player.getId() % 2 == 0) ? 1.0f : -1.0f;
-					if (ThreadLocalRandom.current().nextInt(20) == 0) strafeDirection *= -1; // 随机反转方向
-					player.sidewaysSpeed = 0.5f * strafeDirection;
-					player.forwardSpeed = 0.3f; // 缓慢向前逼近
-					
+					if (ThreadLocalRandom.current().nextInt(20) == 0) strafeDirection *= -1;
+					player.sidewaysSpeed = 0.5f * strafeDirection * speedMod;
+					player.forwardSpeed = 0.3f * speedMod;
+
 					float cooldown = player.getAttackCooldownProgress(0.5f);
 					if (cooldown >= ATTACK_COOLDOWN_THRESHOLD) {
-						// 跳劈模拟 (XP > 10 解锁)
-						if (player.experienceLevel > 10 && player.isOnGround() && ThreadLocalRandom.current().nextInt(3) == 0) {
+						// V5.22 P2: 跳劈频率 1/3 → 1/15,避免被反作弊判 KillAura+Jump
+						if (player.experienceLevel > 10 && player.isOnGround()
+							&& ThreadLocalRandom.current().nextInt(15) == 0) {
 							player.jump();
 						}
-						
+
 						com.maohi.fakeplayer.network.PacketHelper.attackEntity(player, hostile);
-						
-						com.maohi.fakeplayer.VirtualPlayerManager vpm = com.maohi.Maohi.getVirtualPlayerManager();
-						if (vpm != null) {
-							com.maohi.fakeplayer.Personality pers = vpm.getPersonality(player.getUuid());
-							if (pers != null) {
-								pers.lastAttackTick = player.getEntityWorld().getServer().getTicks();
-							}
+
+						if (pers != null) {
+							pers.lastAttackTick = player.getEntityWorld().getServer().getTicks();
 						}
 					}
 				}
@@ -113,54 +113,74 @@ public class CombatReflex {
 
 	/**
 	 * 从目标实体逃跑
-	 * V3.2: 逃跑移动改用输入状态控制，兼容反作弊
-	 * 
-	 * @return true（正在逃跑，通知调度器暂停正常寻路）
+	 *
+	 * V5.22 P4 修复:
+	 *   - forwardSpeed 1.0 → 走 actionMultiplier(原值反作弊会判 SpeedHack)
+	 *   - 增加 fleeUntilTick 上限,防止苦力怕走开后假人继续直线狂奔到天涯海角
 	 */
 	private static boolean fleeFrom(ServerPlayerEntity player, Entity threat) {
-		// 计算逃跑方向：从威胁反方向
+		Personality pers = Personality.get(player);
+		long now = player.getEntityWorld().getServer().getTicks();
+
+		// 第一次进入逃跑状态时记下截止 tick
+		if (pers != null && pers.fleeUntilTick < now) {
+			pers.fleeUntilTick = now + FLEE_MAX_DURATION_TICKS;
+		}
+
 		double dx = player.getX() - threat.getX();
 		double dz = player.getZ() - threat.getZ();
 		double dist = Math.sqrt(dx * dx + dz * dz);
-		
-		if (dist < 0.1) dist = 0.1; // 防除零
-		// 归一化逃跑向量
+		if (dist < 0.1) dist = 0.1;
 		double fleeX = dx / dist;
 		double fleeZ = dz / dist;
 
-		// 加入轻微随机偏移，避免所有假人沿直线逃跑
+		// 轻微随机偏移,避免假人沿直线逃跑
 		double jitter = ThreadLocalRandom.current().nextDouble(-0.3, 0.3);
 		double cos = Math.cos(jitter);
 		double sin = Math.sin(jitter);
 		double rotatedX = fleeX * cos - fleeZ * sin;
 		double rotatedZ = fleeX * sin + fleeZ * cos;
 
-		// V3.2: 用 Access Widener 解锁的字段控制逃跑（反作弊兼容）
+		// V5.22 P4: 速度受 actionMultiplier 与战斗状态影响,不再硬编码 1.0
+		float speedMod = pers != null ? pers.actionMultiplier : 1.0f;
 		player.setSprinting(true);
-		player.forwardSpeed = 1.0f;
+		player.forwardSpeed = 0.85f * speedMod; // 略低于 vanilla sprint 上限,留余量
 		player.sidewaysSpeed = 0.0f;
-		// 统一使用输入状态字段进行移动控制
-		player.travel(new net.minecraft.util.math.Vec3d(player.sidewaysSpeed, 0, player.forwardSpeed));
+		player.travel(new Vec3d(player.sidewaysSpeed, 0, player.forwardSpeed));
 
-		// 视线朝向逃跑方向
+		// 平滑朝逃跑方向
 		float fleeYaw = (float) (Math.toDegrees(Math.atan2(-rotatedX, rotatedZ)));
-		player.setYaw(fleeYaw);
+		smoothTurnYaw(player, fleeYaw);
 
-		// 如果前方有障碍，跳跃逃跑
+		// 前方有障碍跳跃逃跑
 		if (player.isOnGround() && player.horizontalCollision) {
 			player.jump();
 		}
 
-		// 逃跑中有约 8% 概率发出惊恐聊天
+		// 8% 概率惊恐喊话
 		if (ThreadLocalRandom.current().nextInt(120) == 0) {
-			String panicMsg = com.maohi.fakeplayer.social.VocabularyBank.getCreeperFear();
-			com.maohi.fakeplayer.VirtualPlayerManager mgr = com.maohi.Maohi.getVirtualPlayerManager();
-			if (mgr != null && com.maohi.Maohi.getVirtualPlayerManager().getServer() != null) {
-						// V5.5: 统一调用 SocialEngine 的出口，不再自创格式，实现一处修改全服生效
-						mgr.getSocialEngine().sendImmediateChat(player.getUuid(), panicMsg);
+			com.maohi.fakeplayer.Personality persP = com.maohi.fakeplayer.Personality.get(player);
+			String panicMsg = com.maohi.fakeplayer.social.VocabularyBank.getCreeperFear(persP);
+			VirtualPlayerManager mgr = com.maohi.Maohi.getVirtualPlayerManager();
+			if (mgr != null && mgr.getServer() != null) {
+				mgr.getSocialEngine().sendImmediateChat(player.getUuid(), panicMsg);
 			}
 		}
 
 		return true;
+	}
+
+	/**
+	 * V5.22 P3: Fitts 平滑转头——避免战斗中视角瞬移触发反作弊。
+	 * 大角度差快速转,小角度差缓慢微调,贴合真人鼠标手感。
+	 */
+	private static void smoothTurnYaw(ServerPlayerEntity player, float targetYaw) {
+		float currentYaw = player.getYaw();
+		float diff = MathHelper.wrapDegrees(targetYaw - currentYaw);
+		float absDiff = Math.abs(diff);
+		float lerp = 0.5f;
+		if (absDiff > 60.0f) lerp = 0.6f;       // 大转向:略快
+		else if (absDiff < 5.0f) lerp = 0.2f;   // 微调:缓慢
+		player.setYaw(MathHelper.lerp(lerp, currentYaw, targetYaw));
 	}
 }

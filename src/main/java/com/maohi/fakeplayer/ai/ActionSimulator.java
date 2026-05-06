@@ -24,38 +24,46 @@ public class ActionSimulator {
 	 *   服务端自动处理：加经验 + 播放拾取动画 + 销毁实体
 	 */
 	public static void simulateEntityInteraction(ServerPlayerEntity player) {
-		// 拾取范围：6格（与战斗扫描范围一致）
-		List<net.minecraft.entity.Entity> nearbyEntities = player.getEntityWorld().getOtherEntities(
-			player, player.getBoundingBox().expand(6.0)
-		);
-
-		// 1. 经验球：100%全部拾取（真人不会拒绝经验球）
-		// MC原版经验球吸引范围7.25格，扫描8格确保边缘也能吸到
-		List<net.minecraft.entity.Entity> xpNearby = player.getEntityWorld().getOtherEntities(
+		// V5.23: 单次 expand(8.0) 扫描覆盖经验球(吸引范围 7.25)+物品拾取(原 6.0),
+		// 避免原实现用 6.0 + 8.0 两次 getOtherEntities 各扫一遍 + LootTracker 内再 expand(2.5)
+		// 一共三次场景遍历的浪费。还顺带解决了拾取/装备穿戴的双路径复制风险:
+		// 现在拾取统一走 onPlayerCollision(原版),穿戴统一走 LootTracker.tryAutoEquipFromInventory
+		// (只比对背包,不再调 equipStack 直接消费 ItemEntity 数据)。
+		List<net.minecraft.entity.Entity> nearby = player.getEntityWorld().getOtherEntities(
 			player, player.getBoundingBox().expand(8.0)
 		);
-		for (net.minecraft.entity.Entity entity : xpNearby) {
-			if (entity instanceof ExperienceOrbEntity xpEntity && xpEntity.isAlive()) {
+
+		boolean inventoryFull = player.getInventory().getEmptySlot() == -1;
+		// 30% 概率才会做物品筛选拾取(节奏感),低于此阈值跳过 ItemEntity 部分
+		boolean doItemPickup = !inventoryFull && ThreadLocalRandom.current().nextInt(10) < 3;
+		int xpLevel = player.experienceLevel; // 1.21.11: getXpLevel() 已移除,直接读公有字段
+		boolean pickedOneItem = false;
+		double sqDistTo6 = 6.0 * 6.0;
+
+		for (net.minecraft.entity.Entity entity : nearby) {
+			if (!entity.isAlive()) continue;
+			// 1) 经验球:100% 拾取,真人也不会拒绝
+			if (entity instanceof ExperienceOrbEntity xpEntity) {
 				xpEntity.onPlayerCollision(player);
+				continue;
+			}
+			// 2) 物品:每 tick 最多捡一件,且必须落在 6 格内(原行为)
+			if (doItemPickup && !pickedOneItem
+				&& entity instanceof ItemEntity itemEntity
+				&& !itemEntity.cannotPickup()
+				&& player.squaredDistanceTo(entity) <= sqDistTo6
+				&& shouldPickupItem(itemEntity, xpLevel)) {
+				itemEntity.onPlayerCollision(player);
+				pickedOneItem = true;
+				// 不 break,继续吸经验球
 			}
 		}
 
-		// 2. 物品拾取：按等级阶梯过滤，高等级不捡低等级垃圾
-		// 频率：30% 概率执行物品检测（背包操作有节奏感）
-		if (ThreadLocalRandom.current().nextInt(10) >= 3) return;
-		if (player.getInventory().getEmptySlot() == -1) return;
-
-		// V3.3 物资进阶：自动穿戴更好装备（优先于普通拾取）
-		com.maohi.fakeplayer.ai.LootTracker.tryAutoEquipNearby(player);
-
-		int xpLevel = player.experienceLevel; // 1.21.11: getXpLevel() removed, use public field
-		for (net.minecraft.entity.Entity entity : nearbyEntities) {
-			if (entity instanceof ItemEntity itemEntity && !itemEntity.cannotPickup() && itemEntity.isAlive()) {
-				if (shouldPickupItem(itemEntity, xpLevel)) {
-					itemEntity.onPlayerCollision(player);
-					break; // 每次只捡一个物品，模拟人类速度
-				}
-			}
+		// 3) 拾取后再扫一次背包,把更好的武器/护甲穿上(走 equipStack 原版链路)
+		// V5.23: LootTracker 旧 tryAutoEquipNearby(扫场景+消费 ItemEntity 双路径)已移除,
+		// 改成只在背包内比对换装,职责清晰、无复制风险。
+		if (pickedOneItem) {
+			com.maohi.fakeplayer.ai.LootTracker.tryAutoEquipFromInventory(player);
 		}
 	}
 
@@ -145,7 +153,11 @@ public class ActionSimulator {
 	/**
 	 * 随机交互动作模拟
 	 * 真人在野外不会只走路挖矿，会随机做些小事
-	 * 
+	 *
+	 * V5.23 修复:
+	 *   - case 1 蹲下没设置 sneakRemainingTicks → 假人会一直蹲着不站起。
+	 *   - case 3 setYaw 直接瞬移 → 反作弊视角异常。改用 lerp 缓动。
+	 *
 	 * @param player 假人实体
 	 * @return true 表示执行了一个交互动作（tick 中可据此跳过其他动作）
 	 */
@@ -157,17 +169,24 @@ public class ActionSimulator {
 		switch (action) {
 			case 0: // 尝试开门 — 走真实发包
 				return tryOpenDoor(player);
-			case 1: // 蹲下-站起（模拟看东西）
-				player.setSneaking(true);
-				return true;
+			case 1: // 蹲下-站起（模拟看东西)
+				// V5.23: 通过 Personality.sneakRemainingTicks 让 VPM 自动消费 → 站起
+				com.maohi.fakeplayer.Personality persSneak = com.maohi.fakeplayer.Personality.get(player);
+				if (persSneak != null) {
+					player.setSneaking(true);
+					persSneak.isSneaking = true;
+					persSneak.sneakRemainingTicks = 8 + ThreadLocalRandom.current().nextInt(12); // 0.4~1.0s
+					return true;
+				}
+				return false;
 			case 2: // 空挥 — 走真实发包
 				com.maohi.fakeplayer.network.PacketHelper.swingHand(player, net.minecraft.util.Hand.MAIN_HAND);
 				return true;
-			case 3: // 随机转向（模拟环顾四周）
-				float randomYaw = ThreadLocalRandom.current().nextFloat() * 360f;
-				player.setYaw(randomYaw);
+			case 3: // 随机转向(模拟环顾四周) — V5.23: lerp 缓动,不再瞬移
+				float randomYawTarget = ThreadLocalRandom.current().nextFloat() * 360f;
+				smoothTurnYaw(player, randomYawTarget);
 				return true;
-			case 4: // 丢弃一个物品（真人偶尔会扔东西）
+			case 4: // 丢弃一个物品（真人偶尔会扔东西)
 				if (!player.getMainHandStack().isEmpty()) {
 					player.dropItem(player.getMainHandStack().split(1), true, true);
 					return true;
@@ -176,6 +195,19 @@ public class ActionSimulator {
 			default:
 				return false;
 		}
+	}
+
+	/**
+	 * V5.23: Fitts 平滑转头(与 CombatReflex 同款 lerp 系数)。
+	 * 大角度快转,小角度微调,避免反作弊检测视角瞬移。
+	 */
+	private static void smoothTurnYaw(ServerPlayerEntity player, float targetYaw) {
+		float currentYaw = player.getYaw();
+		float absDiff = Math.abs(net.minecraft.util.math.MathHelper.wrapDegrees(targetYaw - currentYaw));
+		float lerp = 0.5f;
+		if (absDiff > 60.0f) lerp = 0.6f;
+		else if (absDiff < 5.0f) lerp = 0.2f;
+		player.setYaw(net.minecraft.util.math.MathHelper.lerp(lerp, currentYaw, targetYaw));
 	}
 
 	/**

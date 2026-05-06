@@ -1,5 +1,6 @@
 package com.maohi.fakeplayer.ai;
 
+import com.maohi.fakeplayer.GrowthPhase;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -10,11 +11,25 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * 智能运动控制器 (V3)
+ *
+ * V5.22 优化:
+ *   - findPath 失败冷却 5s,杜绝主线程每 tick 跑 A*(不可达目标时的 lag 元凶)
+ *   - 到达检测距离统一(终点 / waypoint 都用 2.25,防止终点抽搐)
+ *   - noiseTime 周期性 mod,避免 double 累积进入退化抖动
+ *   - sightseeing 早期阶段豁免,基础成就期不被"看风景"吃 5 秒
+ *   - 方向切换误触发概率从 1/10 降到 1/40
  */
 public class MovementController {
 
-	/** 噪声采样时间步进（全局共享，每个 tick 递增） */
+	/** 寻路失败后的冷却时长(毫秒) */
+	private static final long PATHFIND_FAIL_COOLDOWN_MS = 5_000L;
+
+	/**
+	 * 噪声采样时间步进。每 tick 递增,但用 mod 防止 double 进入退化区间。
+	 * 周期 = 1_000_000 tick ≈ 13.9 小时,远超单 session 时长,且周期内不会重复抖动模式。
+	 */
 	private static double noiseTime = 0;
+	private static final double NOISE_TIME_PERIOD = 1_000_000.0;
 
 	/**
 	 * 简化 Perlin 噪声（1D）
@@ -27,9 +42,9 @@ public class MovementController {
 		return (float) (v * amp);
 	}
 
-	/** 每 tick 递增噪声时间 */
+	/** 每 tick 递增噪声时间(防 double 累积失真) */
 	public static void tickNoise() {
-		noiseTime += 1.0;
+		noiseTime = (noiseTime + 1.0) % NOISE_TIME_PERIOD;
 	}
 
 	/** 获取当前噪声时间 */
@@ -66,8 +81,10 @@ public class MovementController {
 			}
 			
 			// 方向大切换时产生随机停顿
+			// V5.22: 误触发概率从 1/10 降到 1/40——原值在每次启停时几乎必触发,
+			//        导致 mining"接近目标→减速→停"反复抽搐
 			if (Math.abs(forward - p.forwardSpeed) > 0.5f || Math.abs(sideways - p.sidewaysSpeed) > 0.5f) {
-				if (ThreadLocalRandom.current().nextInt(10) == 0) {
+				if (ThreadLocalRandom.current().nextInt(40) == 0) {
 					pers.keyReleaseMicroGapTicks = 1 + ThreadLocalRandom.current().nextInt(2); // 50-100ms
 					return;
 				}
@@ -104,7 +121,10 @@ public class MovementController {
 			p.setYaw(p.getYaw() + perlinLike(noisePhaseYaw * 0.8, noiseTime, 1.5f));
 			return false;
 		}
-		if (pers != null && ThreadLocalRandom.current().nextInt(300) == 0) {
+		// V5.22: 早期阶段(石器/铁器)豁免 sightseeing,基础成就期不能被"看风景"吃 5 秒
+		boolean lateGame = pers != null && pers.growthPhase != null
+			&& pers.growthPhase.ordinal() >= GrowthPhase.DIAMOND_AGE.ordinal();
+		if (lateGame && ThreadLocalRandom.current().nextInt(300) == 0) {
 			pers.sightseeingTicks = 60 + ThreadLocalRandom.current().nextInt(100);
 			stopMovement(p);
 			return false;
@@ -114,9 +134,10 @@ public class MovementController {
 		Vec3d pos = new Vec3d(p.getX(), p.getY(), p.getZ());
 
 		// 到达目标
+		// V5.22: 阈值统一为 2.25(原 1.5),与 waypoint 到达检测一致,防终点附近抽搐
 		double dx = target.getX() + 0.5 - pos.x;
 		double dz = target.getZ() + 0.5 - pos.z;
-		if (dx * dx + dz * dz <= 1.5) { stopMovement(p); return true; }
+		if (dx * dx + dz * dz <= 2.25) { stopMovement(p); return true; }
 
 		// ★ A* 路径跟随：如果有缓存路径且目标未变，沿路径走
 		BlockPos nextWaypoint = target;
@@ -126,12 +147,18 @@ public class MovementController {
 				pers.currentPath.clear();
 				pers.pathGoal = null;
 			}
-			// 路径为空时尝试计算
-			if (pers.currentPath.isEmpty()) {
+			// V5.22: findPath 失败冷却——避免主线程每 tick 跑 A*
+			//   原实现:目标不可达 → 路径恒为空 → 每 tick 都重算 → 每秒 20 次 A*
+			//   现在:findPath 返回空就冷却 5 秒,期间直线朝 target 走(碰墙交给下面的避障)
+			long now = System.currentTimeMillis();
+			if (pers.currentPath.isEmpty() && now >= pers.pathfindCooldownUntil) {
 				java.util.List<BlockPos> path = PathfindingNavigation.findPath(world, p.getBlockPos(), target);
 				if (!path.isEmpty()) {
 					pers.currentPath.addAll(path);
 					pers.pathGoal = target;
+				} else {
+					// 找不到路径,冷却避免反复算
+					pers.pathfindCooldownUntil = now + PATHFIND_FAIL_COOLDOWN_MS;
 				}
 			}
 			// 消费已到达的路径点

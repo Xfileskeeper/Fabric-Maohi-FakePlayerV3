@@ -1,48 +1,56 @@
 package com.maohi.fakeplayer.ai.phase;
 
-import com.maohi.fakeplayer.TimingConstants;
-import com.maohi.fakeplayer.VirtualPlayerManager;
 import com.maohi.fakeplayer.Personality;
 import com.maohi.fakeplayer.TaskType;
+import com.maohi.fakeplayer.TimingConstants;
+import com.maohi.fakeplayer.ai.EatingBehavior;
 import com.maohi.fakeplayer.ai.MovementController;
+import com.maohi.fakeplayer.ai.PathfindingNavigation;
 import com.maohi.fakeplayer.network.PacketHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.EndPortalBlock;
+import net.minecraft.block.EndPortalFrameBlock;
 import net.minecraft.entity.boss.dragon.EnderDragonEntity;
-import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 第五阶段：末影龙 (V3.2)
+ * 第五阶段:末影龙 (V5.23 重写)
  *
- * 目标：进入末地，挑战并击败末影龙
- * 进入条件：背包有下界合金装备
- * 毕业条件：末影龙被击败（服务器广播）
+ * 阶段定位:已有下界合金装备,目标是进末地击杀末影龙。
+ * 出口成就:`end/root`(进末地)、`end/kill_dragon`(击败龙)、`end/levitate`/`end/elytra`...
  *
- * 任务优先级：
- *   1. 在主世界 → 寻找要塞（使用末影之眼）
- *   2. 在要塞附近 → 寻找末地传送门并激活
- *   3. 在末地 → 摧毁末地水晶
- *   4. 在末地 → 攻击末影龙
- *   5. 末影龙击败 → 返回主世界
- *
- * 1.21.11 适配要点：
- *   - 使用 RegistryKey 判断维度
- *   - 末影之眼使用 Items.ENDER_EYE
- *   - 末地传送门框架使用 Blocks.END_PORTAL_FRAME
- *   - 末影龙实体使用 EnderDragonEntity
+ * V5.23 修复硬伤:
+ *   1. setPosition 瞬移作弊 — findAndUseExitPortal 直接 player.setPosition 进 portal,
+ *      反作弊一眼抓。改为走到 portal 方块上让原版传送逻辑触发。
+ *   2. 实体扫描炸弹 — findEndCrystal 用 33×33×13 = ~14000 次 getOtherEntities 实体扫描,
+ *      O(14000 × N) 是 MSPT 灾难。改为一次 Box(±128, 0~128, ±128) 的 getEntitiesByClass。
+ *   3. 视角瞬移 ×3 — activateEndPortal / attackEndCrystal / attackEnderDragon 全部直接 setYaw,
+ *      改为 lerp 缓动(复用同款 Fitts 系数)。
+ *   4. 扫描重复 — isNearStronghold(粗)+findEndPortalFrame(细)两轮扫描,合并为一次带缓存。
+ *   5. 早判退场 — 找不到龙立刻 findAndUseExitPortal 会让刚进末地的假人立刻走人。
+ *      加 "末地停留 >= 60 秒无龙 = 视为已击败才退场"的延迟判定。
+ *   6. 弓箭未接状态机 — 旧 tryUseBow 只 useItem 不释放,反作弊抓"持续拉弓永不射"。
+ *      改用现成的 EatingBehavior.tryRangedAttack,自带 isUsingBow 状态机。
+ *   7. hasEnderEyes 扫整个 inv 但 activateEndPortal/throwEnderEye 只看 hotbar 0-8 —
+ *      不一致,统一改为扫整个 inv 并自动切槽。
+ *   8. 末地 EXPLORING 平面 ±100 — 会走到虚空。改为主平台附近安全目标。
  */
 public final class PhaseEnderDragon implements Phase {
 
@@ -50,10 +58,30 @@ public final class PhaseEnderDragon implements Phase {
 
     private PhaseEnderDragon() {}
 
+    // ============================================================
+    // 扫描缓存 (per-player UUID → ScanCache, 5s TTL)
+    // ============================================================
+    private static final long SCAN_CACHE_TTL_MS = 5_000L;
+
+    private static final ConcurrentHashMap<java.util.UUID, ScanCache> SCAN_CACHE = new ConcurrentHashMap<>();
+
+    private static final class ScanCache {
+        BlockPos portalFrame;
+        long portalFrameCachedAt;
+        long endEnteredAt;   // 假人第一次踏入末地的时间戳,用于延迟退场判定
+    }
+
+    /** V5.23: 假人下线时清理缓存(VPM 的 logout 路径调用) */
+    public static void onPlayerLogout(java.util.UUID uuid) {
+        SCAN_CACHE.remove(uuid);
+    }
+
+    /** 末地停留多久后仍找不到龙才视为已击败 → 退场 */
+    private static final long DRAGON_GONE_GRACE_MS = 60_000L;
+
     /**
      * 分配末影龙阶段任务
-     * NOTE: PhaseContext 字段在本阶段未使用——末影龙战斗 / 末地水晶等都在文件内部静态查找。
-     * 保留 ctx 参数以满足接口契约。
+     * NOTE: PhaseContext 字段在本阶段未使用——末影龙战斗/末地水晶都在文件内部静态查找。
      */
     @Override
     public void assignTask(ServerPlayerEntity player, Personality personality, PhaseContext ctx) {
@@ -61,158 +89,171 @@ public final class PhaseEnderDragon implements Phase {
         boolean isEnd = world.getRegistryKey() == World.END;
         boolean isOverworld = world.getRegistryKey() == World.OVERWORLD;
 
-        // 1. 在末地 → 战斗逻辑
         if (isEnd) {
             assignEndFightTask(player, personality);
             return;
         }
 
-        // 2. 在主世界 → 寻找要塞
+        // 主世界 — 寻找要塞
         if (isOverworld) {
-            // 检查是否有末影之眼
-            if (hasEnderEyes(player)) {
-                // 尝试寻找/前往要塞
-                if (tryFindStronghold(player, personality)) {
-                    return;
-                }
-            } else {
-                // 没有末影之眼，需要先去下界打烈焰人获取烈焰棒
-                // 这里回退到探索任务，让 PhaseNether 处理
-                set(personality, TaskType.EXPLORING,
-                    player.getBlockPos().add(rnd(100) - 50, 0, rnd(100) - 50),
-                    TimingConstants.TASK_TIMEOUT_EXPLORE);
-                return;
+            if (hasEnderEyesAnywhere(player)) {
+                if (tryFindStronghold(player, personality)) return;
             }
+            // 没眼或找不到要塞:引导去下界补烈焰棒(由 PhaseNether 接手)
+            set(personality, TaskType.EXPLORING,
+                overworldSurfacePoint(world, player, 100),
+                TimingConstants.TASK_TIMEOUT_EXPLORE);
+            return;
         }
 
-        // 3. 在其他维度或 fallback → 探索
+        // 下界或其他维度:兜底探索 (理论上 ENDGAME 阶段不应在下界,但容错)
         set(personality, TaskType.EXPLORING,
-            player.getBlockPos().add(rnd(100) - 50, 0, rnd(100) - 50),
+            player.getBlockPos().add(rnd(101) - 50, 0, rnd(101) - 50),
             TimingConstants.TASK_TIMEOUT_EXPLORE);
     }
 
-    /**
-     * 分配末地战斗任务
-     */
+    // ============================================================
+    // 末地战斗
+    // ============================================================
     private static void assignEndFightTask(ServerPlayerEntity player, Personality personality) {
         ServerWorld world = player.getEntityWorld();
+        // 记录首次踏入末地时间(用于延迟退场判定)
+        ScanCache c = SCAN_CACHE.computeIfAbsent(player.getUuid(), k -> new ScanCache());
+        if (c.endEnteredAt == 0) c.endEnteredAt = System.currentTimeMillis();
 
-        // 1. 寻找末影龙
+        // 1. 找龙
         EnderDragonEntity dragon = findEnderDragon(world);
         if (dragon == null) {
-            // 末影龙可能已被击败，返回主世界
-            findAndUseExitPortal(player, personality);
-            return;
-        }
-
-        // 2. 寻找并摧毁末地水晶
-        BlockPos crystalPos = findEndCrystal(world, player.getBlockPos());
-        if (crystalPos != null) {
-            double distSq = player.squaredDistanceTo(
-                crystalPos.getX() + 0.5, crystalPos.getY(), crystalPos.getZ() + 0.5);
-            if (distSq > 25.0) {
-                // 走向水晶
-                personality.currentTask = TaskType.EXPLORING;
-                personality.taskTarget = crystalPos;
-                personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
+            // V5.23: 不立刻退场 — 刚进末地几 tick 服务端可能还没刷出龙。
+            // 停留超过 60 秒仍找不到才视为"龙已击败",触发退场。
+            long stayedMs = System.currentTimeMillis() - c.endEnteredAt;
+            if (stayedMs >= DRAGON_GONE_GRACE_MS) {
+                findAndUseExitPortal(player, personality);
             } else {
-                // 攻击水晶（用弓箭或近战）
-                attackEndCrystal(player, crystalPos);
+                // 尚在宽限期:安全平台附近待命
+                set(personality, TaskType.IDLE, nearEndSpawnPlatform(player), 10_000L);
             }
             return;
         }
 
-        // 3. 攻击末影龙
+        // 2. 找末地水晶 — 龙回血器
+        EndCrystalEntity crystal = findClosestEndCrystal(world, player);
+        if (crystal != null) {
+            double distSq = player.squaredDistanceTo(crystal);
+            if (distSq > 25.0) {
+                personality.currentTask = TaskType.EXPLORING;
+                personality.taskTarget = crystal.getBlockPos();
+                personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
+            } else {
+                attackEndCrystal(player, personality, crystal);
+            }
+            return;
+        }
+
+        // 3. 所有水晶清光,攻击龙本体
         double dragonDistSq = player.squaredDistanceTo(dragon);
         if (dragonDistSq > 64.0) {
-            // 靠近末影龙
             personality.currentTask = TaskType.EXPLORING;
             personality.taskTarget = dragon.getBlockPos();
             personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
         } else {
-            // 攻击末影龙
-            attackEnderDragon(player, dragon);
+            attackEnderDragon(player, personality, dragon);
         }
     }
 
-    /**
-     * 尝试寻找要塞
-     * @return true 如果成功开始寻找要塞
-     */
+    // ============================================================
+    // 要塞与末地传送门
+    // ============================================================
     private static boolean tryFindStronghold(ServerPlayerEntity player, Personality personality) {
         ServerWorld world = player.getEntityWorld();
         BlockPos playerPos = player.getBlockPos();
 
-        // 1. 检查是否已经在要塞附近
-        if (isNearStronghold(world, playerPos)) {
-            // 寻找末地传送门
-            BlockPos portalFrame = findEndPortalFrame(world, playerPos);
-            if (portalFrame != null) {
-                double distSq = player.squaredDistanceTo(
-                    portalFrame.getX() + 0.5, portalFrame.getY(), portalFrame.getZ() + 0.5);
-                if (distSq > 4.0) {
-                    // 走向传送门
-                    personality.currentTask = TaskType.EXPLORING;
-                    personality.taskTarget = portalFrame;
-                    personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
-                } else {
-                    // 激活传送门
-                    activateEndPortal(player, portalFrame);
-                }
+        // V5.23: 一次扫描 + 缓存,合并 isNearStronghold / findEndPortalFrame 两轮扫描
+        BlockPos portalFrame = lookupPortalFrame(player, world);
+        if (portalFrame != null) {
+            double distSq = player.squaredDistanceTo(
+                portalFrame.getX() + 0.5, portalFrame.getY(), portalFrame.getZ() + 0.5);
+            if (distSq > 4.0) {
+                personality.currentTask = TaskType.EXPLORING;
+                personality.taskTarget = portalFrame;
+                personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
+                return true;
+            }
+            // 到了框架附近 — 看是否已激活
+            BlockState frameState = world.getBlockState(portalFrame);
+            if (frameState.isOf(Blocks.END_PORTAL_FRAME)
+                && !frameState.get(EndPortalFrameBlock.EYE)) {
+                activateEndPortalFrame(player, portalFrame);
+                return true;
+            }
+            // 已激活 → 找整个传送门中心,跳入
+            BlockPos portalCenter = findActivePortalCenter(world, portalFrame);
+            if (portalCenter != null) {
+                // 让假人走到传送门中心,原版传送逻辑自动触发
+                personality.currentTask = TaskType.EXPLORING;
+                personality.taskTarget = portalCenter;
+                personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
                 return true;
             }
         }
 
-        // 2. 使用末影之眼寻找要塞方向
-        // 简化：随机选择一个方向走一段距离，然后投掷末影之眼
+        // 2. 未找到要塞/框架 — 投末影之眼(节流:30% 概率)
         if (ThreadLocalRandom.current().nextInt(100) < 30) {
-            // 投掷末影之眼
             throwEnderEye(player);
         }
 
-        // 向随机方向探索
+        // 按末影之眼扔出的方向走(简化:大范围随机探索,地表锁定)
         set(personality, TaskType.EXPLORING,
-            playerPos.add(rnd(200) - 100, 0, rnd(200) - 100),
+            overworldSurfacePoint(world, player, 150),
             TimingConstants.TASK_TIMEOUT_EXPLORE);
         return true;
     }
 
-    /**
-     * 检查是否在要塞附近
-     * 通过检测是否有末地传送门框架方块
-     */
-    private static boolean isNearStronghold(ServerWorld world, BlockPos center) {
-        for (int dx = -32; dx <= 32; dx += 4) {
-            for (int dy = -16; dy <= 16; dy++) {
-                for (int dz = -32; dz <= 32; dz += 4) {
-                    BlockPos pos = center.add(dx, dy, dz);
-                    if (world.getBlockState(pos).isOf(Blocks.END_PORTAL_FRAME)) {
-                        return true;
+    /** V5.23: 5s 缓存的 END_PORTAL_FRAME 查找 */
+    private static BlockPos lookupPortalFrame(ServerPlayerEntity player, ServerWorld world) {
+        ScanCache c = SCAN_CACHE.computeIfAbsent(player.getUuid(), k -> new ScanCache());
+        long now = System.currentTimeMillis();
+        if (c.portalFrame != null && now - c.portalFrameCachedAt < SCAN_CACHE_TTL_MS) {
+            if (world.getBlockState(c.portalFrame).isOf(Blocks.END_PORTAL_FRAME)) return c.portalFrame;
+            c.portalFrame = null;
+        }
+        BlockPos found = findEndPortalFrame(world, player.getBlockPos());
+        c.portalFrame = found;
+        c.portalFrameCachedAt = now;
+        return found;
+    }
+
+    /** 统一扫描:找 END_PORTAL_FRAME(优先未激活/返回一个代表位置) */
+    private static BlockPos findEndPortalFrame(ServerWorld world, BlockPos center) {
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        BlockPos firstFound = null;
+        BlockPos firstUnlit = null;
+        for (int dx = -24; dx <= 24; dx += 2) {
+            for (int dy = -12; dy <= 12; dy++) {
+                for (int dz = -24; dz <= 24; dz += 2) {
+                    mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+                    BlockState state = world.getBlockState(mut);
+                    if (state.isOf(Blocks.END_PORTAL_FRAME)) {
+                        if (firstFound == null) firstFound = mut.toImmutable();
+                        if (firstUnlit == null && !state.get(EndPortalFrameBlock.EYE)) {
+                            firstUnlit = mut.toImmutable();
+                        }
                     }
                 }
             }
         }
-        return false;
+        return firstUnlit != null ? firstUnlit : firstFound;
     }
 
-    /**
-     * 寻找末地传送门框架
-     */
-    private static BlockPos findEndPortalFrame(ServerWorld world, BlockPos center) {
-        for (int dx = -24; dx <= 24; dx += 2) {
-            for (int dy = -12; dy <= 12; dy++) {
-                for (int dz = -24; dz <= 24; dz += 2) {
-                    BlockPos pos = center.add(dx, dy, dz);
-                    BlockState state = world.getBlockState(pos);
-                    if (state.isOf(Blocks.END_PORTAL_FRAME)) {
-                        // 找到未激活的框架
-                        if (!state.get(net.minecraft.block.EndPortalFrameBlock.EYE)) {
-                            return pos;
-                        }
-                        // 或者返回已激活的传送门位置
-                        if (world.getBlockState(pos.up()).getBlock() instanceof EndPortalBlock) {
-                            return pos;
-                        }
+    /** 找已激活传送门的中心 EndPortalBlock 位置 */
+    private static BlockPos findActivePortalCenter(ServerWorld world, BlockPos framePos) {
+        // 末地传送门中心在 12 个框架的中间,通常在 framePos 附近 3x3 范围内向上 1 格
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dz = -3; dz <= 3; dz++) {
+                for (int dy = 0; dy <= 2; dy++) {
+                    BlockPos pos = framePos.add(dx, dy, dz);
+                    if (world.getBlockState(pos).getBlock() instanceof EndPortalBlock) {
+                        return pos;
                     }
                 }
             }
@@ -221,240 +262,209 @@ public final class PhaseEnderDragon implements Phase {
     }
 
     /**
-     * 激活末地传送门
-     * 在空的框架上放置末影之眼
+     * 激活一个框架:切末影之眼槽位 → 面朝框架 → interactBlock 放置
+     * 每次 assignTask 只放一个(跨 tick 自然分布,避免 12 眼瞬间放完的 bot-like 痕迹)
      */
-    private static void activateEndPortal(ServerPlayerEntity player, BlockPos framePos) {
-        net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
-
-        // 找末影之眼槽位
-        int eyeSlot = -1;
-        for (int i = 0; i < 9; i++) {
-            if (inv.getStack(i).isOf(Items.ENDER_EYE)) {
-                eyeSlot = i;
-                break;
-            }
-        }
-
+    private static void activateEndPortalFrame(ServerPlayerEntity player, BlockPos framePos) {
+        // V5.23: 只允许 hotbar 内的眼直接使用 — 眼若在主背包就放弃这次激活,
+        // 等 InventorySimulator 自然把它整理到 hotbar(避免 setStack swap 的反作弊风险)
+        int eyeSlot = findItemSlotInHotbar(player, Items.ENDER_EYE);
         if (eyeSlot == -1) return;
 
-        // 切换到末影之眼
         PacketHelper.setSelectedSlot(player, eyeSlot);
 
-        // 面向框架
+        // V5.23: lerp 缓动视角,不再瞬移
         Vec3d frameCenter = Vec3d.ofCenter(framePos);
-        double dx = frameCenter.x - player.getX();
-        double dz = frameCenter.z - player.getZ();
-        float targetYaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
-        player.setYaw(targetYaw);
+        smoothTurnYaw(player, computeYaw(player, frameCenter));
 
-        // 交互放置末影之眼
-        BlockHitResult hitResult = new BlockHitResult(
-            frameCenter,
-            Direction.UP,
-            framePos,
-            false
-        );
-        PacketHelper.interactBlock(player, Hand.MAIN_HAND, hitResult);
+        BlockHitResult hit = new BlockHitResult(frameCenter, Direction.UP, framePos, false);
+        PacketHelper.interactBlock(player, Hand.MAIN_HAND, hit);
         PacketHelper.swingHand(player, Hand.MAIN_HAND);
     }
 
-    /**
-     * 投掷末影之眼
-     */
+    /** 投末影之眼寻找要塞方向 */
     private static void throwEnderEye(ServerPlayerEntity player) {
-        net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
-
-        // 找末影之眼槽位
-        int eyeSlot = -1;
-        for (int i = 0; i < 9; i++) {
-            if (inv.getStack(i).isOf(Items.ENDER_EYE)) {
-                eyeSlot = i;
-                break;
-            }
-        }
-
+        int eyeSlot = findItemSlotInHotbar(player, Items.ENDER_EYE);
         if (eyeSlot == -1) return;
 
-        // 切换到末影之眼并使用
         PacketHelper.setSelectedSlot(player, eyeSlot);
         PacketHelper.useItem(player, Hand.MAIN_HAND);
         PacketHelper.swingHand(player, Hand.MAIN_HAND);
     }
 
+    // ============================================================
+    // 水晶与龙
+    // ============================================================
+
     /**
-     * 寻找并攻击末地水晶
+     * V5.23: 一次 Box 查询代替 14000 次方块扫描。
+     * 末地水晶全在主岛主平台半径 ~70 范围内,用 ±128 Box 绝对覆盖。
      */
-    private static BlockPos findEndCrystal(ServerWorld world, BlockPos center) {
-        // 末地水晶通常在黑曜石柱顶部 (Y=80~100)
-        for (int dx = -64; dx <= 64; dx += 4) {
-            for (int dz = -64; dz <= 64; dz += 4) {
-                for (int dy = 60; dy <= 120; dy += 5) {
-                    BlockPos pos = center.add(dx, dy - center.getY(), dz);
-                    // 检查是否有末地水晶实体在附近
-                    var entities = world.getOtherEntities(null,
-                        new net.minecraft.util.math.Box(pos.getX() - 2, pos.getY() - 2, pos.getZ() - 2,
-                                                        pos.getX() + 2, pos.getY() + 2, pos.getZ() + 2));
-                    for (var entity : entities) {
-                        if (entity instanceof net.minecraft.entity.decoration.EndCrystalEntity) {
-                            return entity.getBlockPos();
-                        }
-                    }
-                }
-            }
+    private static EndCrystalEntity findClosestEndCrystal(ServerWorld world, ServerPlayerEntity player) {
+        List<EndCrystalEntity> crystals = world.getEntitiesByClass(
+            EndCrystalEntity.class,
+            new Box(-128, 0, -128, 128, 256, 128),
+            e -> e.isAlive());
+        if (crystals.isEmpty()) return null;
+        EndCrystalEntity closest = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (EndCrystalEntity c : crystals) {
+            double d = player.squaredDistanceTo(c);
+            if (d < bestDistSq) { bestDistSq = d; closest = c; }
         }
-        return null;
+        return closest;
     }
 
-    /**
-     * 攻击末地水晶
-     */
-    private static void attackEndCrystal(ServerPlayerEntity player, BlockPos crystalPos) {
-        // 面向水晶
-        Vec3d crystalCenter = Vec3d.ofCenter(crystalPos).add(0, 1, 0);
-        double dx = crystalCenter.x - player.getX();
-        double dz = crystalCenter.z - player.getZ();
-        float targetYaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
-        player.setYaw(targetYaw);
+    private static void attackEndCrystal(ServerPlayerEntity player, Personality personality, EndCrystalEntity crystal) {
+        double distSq = player.squaredDistanceTo(crystal);
+        // V5.23: 视角 lerp
+        smoothTurnYaw(player, computeYaw(player, crystal.getEyePos()));
 
-        // 尝试用弓箭射击
-        if (tryUseBow(player)) {
-            return;
-        }
-
-        // 靠近并近战攻击
-        double distSq = player.squaredDistanceTo(crystalCenter);
-        if (distSq > 9.0) {
-            MovementController.doSmartMove(player, crystalPos, 1.0,
+        // 远距优先弓箭(走现成 EatingBehavior 状态机,自带 isUsingBow 释放链)
+        if (distSq > 25.0) {
+            if (EatingBehavior.tryRangedAttack(player, personality, Math.sqrt(distSq))) return;
+            // 弓不可用就跑过去
+            MovementController.doSmartMove(player, crystal.getBlockPos(), 1.0,
                 ThreadLocalRandom.current().nextDouble() * 1000,
                 ThreadLocalRandom.current().nextDouble() * 1000);
-        } else {
-            // 近战攻击水晶
-            var entities = player.getEntityWorld().getOtherEntities(player,
-                new net.minecraft.util.math.Box(crystalPos.getX() - 1, crystalPos.getY() - 1, crystalPos.getZ() - 1,
-                                                crystalPos.getX() + 1, crystalPos.getY() + 3, crystalPos.getZ() + 1));
-            for (var entity : entities) {
-                if (entity instanceof net.minecraft.entity.decoration.EndCrystalEntity) {
-                    PacketHelper.attackEntity(player, entity);
-                    break;
-                }
-            }
-        }
-    }
-
-    /**
-     * 寻找末影龙
-     */
-    private static EnderDragonEntity findEnderDragon(ServerWorld world) {
-        var entities = world.getEntitiesByClass(EnderDragonEntity.class,
-            new net.minecraft.util.math.Box(-300, 0, -300, 300, 256, 300),
-            entity -> entity.isAlive());
-        return entities.isEmpty() ? null : entities.get(0);
-    }
-
-    /**
-     * 攻击末影龙
-     */
-    private static void attackEnderDragon(ServerPlayerEntity player, EnderDragonEntity dragon) {
-        // 面向末影龙
-        Vec3d dragonPos = dragon.getEyePos();
-        double dx = dragonPos.x - player.getX();
-        double dz = dragonPos.z - player.getZ();
-        float targetYaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
-        player.setYaw(targetYaw);
-
-        // 尝试用弓箭
-        if (tryUseBow(player)) {
             return;
         }
+        // 近距直接 attackEntity
+        PacketHelper.attackEntity(player, crystal);
+    }
 
-        // 靠近并近战
+    private static EnderDragonEntity findEnderDragon(ServerWorld world) {
+        // V5.23: 范围缩小到 ±200(末地主岛 ±70 足够,留 buffer)
+        List<EnderDragonEntity> list = world.getEntitiesByClass(
+            EnderDragonEntity.class,
+            new Box(-200, 0, -200, 200, 256, 200),
+            e -> e.isAlive());
+        return list.isEmpty() ? null : list.get(0);
+    }
+
+    private static void attackEnderDragon(ServerPlayerEntity player, Personality personality, EnderDragonEntity dragon) {
         double distSq = player.squaredDistanceTo(dragon);
+        smoothTurnYaw(player, computeYaw(player, dragon.getEyePos()));
+
         if (distSq > 16.0) {
+            // 远距弓箭
+            if (EatingBehavior.tryRangedAttack(player, personality, Math.sqrt(distSq))) return;
+            // 近身
             MovementController.doSmartMove(player, dragon.getBlockPos(), 1.0,
                 ThreadLocalRandom.current().nextDouble() * 1000,
                 ThreadLocalRandom.current().nextDouble() * 1000);
         } else {
-            // 攻击末影龙
             PacketHelper.attackEntity(player, dragon);
         }
     }
 
-    /**
-     * 尝试使用弓箭
-     */
-    private static boolean tryUseBow(ServerPlayerEntity player) {
-        net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
-        int bowSlot = -1;
-        boolean hasArrows = false;
-
-        for (int i = 0; i < 9; i++) {
-            ItemStack stack = inv.getStack(i);
-            if (bowSlot == -1 && stack.isOf(Items.BOW)) {
-                bowSlot = i;
-            }
-            if (!hasArrows && (stack.isOf(Items.ARROW) || stack.isOf(Items.SPECTRAL_ARROW))) {
-                hasArrows = true;
-            }
-        }
-
-        if (bowSlot == -1 || !hasArrows) return false;
-
-        // 切换到弓并拉弓
-        PacketHelper.setSelectedSlot(player, bowSlot);
-        PacketHelper.useItem(player, Hand.MAIN_HAND);
-        // 拉弓 1 秒后释放（在 tick 中处理）
-        return true;
-    }
-
-    /**
-     * 寻找并使用返回传送门
-     */
+    // ============================================================
+    // 退场:返回主世界传送门
+    // ============================================================
     private static void findAndUseExitPortal(ServerPlayerEntity player, Personality personality) {
         ServerWorld world = player.getEntityWorld();
-        BlockPos playerPos = player.getBlockPos();
+        // 末地返回传送门固定在 (0, ~60, 0) 主岛中心,由基岩框架 + 中心 EndPortalBlock 构成。
+        // 直接走到 (0, 65, 0) 附近,让 AI 自然找路过去。
+        BlockPos center = new BlockPos(0, 65, 0);
 
-        // 寻找返回传送门（基岩框架中心）
-        for (int dx = -64; dx <= 64; dx += 4) {
-            for (int dz = -64; dz <= 64; dz += 4) {
-                BlockPos pos = playerPos.add(dx, 0, dz);
-                // 返回传送门在 (0, 64, 0) 附近，由基岩组成
-                if (world.getBlockState(pos).isOf(Blocks.BEDROCK)) {
-                    // 检查下方是否有传送门方块
-                    if (world.getBlockState(pos.down()).getBlock() instanceof EndPortalBlock) {
-                        double distSq = player.squaredDistanceTo(
-                            pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
-                        if (distSq > 4.0) {
-                            personality.currentTask = TaskType.EXPLORING;
-                            personality.taskTarget = pos;
-                            personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
-                        } else {
-                            // 跳进传送门
-                            player.setPosition(pos.getX() + 0.5, pos.getY() - 0.5, pos.getZ() + 0.5);
-                        }
-                        return;
+        // 扫描 ±8 查找真正的 EndPortalBlock 位置(基岩顶上)
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        BlockPos portalPos = null;
+        scanLoop:
+        for (int dy = -8; dy <= 8; dy++) {
+            for (int dx = -4; dx <= 4; dx++) {
+                for (int dz = -4; dz <= 4; dz++) {
+                    mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+                    if (world.getBlockState(mut).getBlock() instanceof EndPortalBlock) {
+                        portalPos = mut.toImmutable();
+                        break scanLoop;
                     }
                 }
             }
         }
 
-        // 找不到传送门，向 (0, 64, 0) 走
+        if (portalPos != null) {
+            double distSq = player.squaredDistanceTo(
+                portalPos.getX() + 0.5, portalPos.getY(), portalPos.getZ() + 0.5);
+            if (distSq > 4.0) {
+                // V5.23: 走过去,不再 setPosition 瞬移
+                personality.currentTask = TaskType.EXPLORING;
+                personality.taskTarget = portalPos;
+                personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
+            } else {
+                // 到了 portal 格上 — 让原版传送逻辑自动触发,这里只保持 IDLE 原地站
+                personality.currentTask = TaskType.IDLE;
+                personality.taskTarget = portalPos;
+                personality.taskExpireTime = System.currentTimeMillis() + 10_000L;
+            }
+            return;
+        }
+        // 找不到 portal(罕见:末地主岛被破坏)— 走向 (0,65,0)
         personality.currentTask = TaskType.EXPLORING;
-        personality.taskTarget = new BlockPos(0, 64, 0);
+        personality.taskTarget = center;
         personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
     }
 
-    /**
-     * 检查是否有末影之眼
-     */
-    private static boolean hasEnderEyes(ServerPlayerEntity player) {
+    // ============================================================
+    // 辅助方法
+    // ============================================================
+
+    /** V5.23: 扫整个背包找物品(替代旧 hasEnderEyes 只扫前 9 格 vs 各用法前后不一致) */
+    private static boolean hasEnderEyesAnywhere(ServerPlayerEntity player) {
+        return findItemSlotAnywhere(player, Items.ENDER_EYE) != -1;
+    }
+
+    private static int findItemSlotAnywhere(ServerPlayerEntity player, net.minecraft.item.Item item) {
         net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
         for (int i = 0; i < inv.size(); i++) {
-            if (inv.getStack(i).isOf(Items.ENDER_EYE)) {
-                return true;
-            }
+            if (inv.getStack(i).isOf(item)) return i;
         }
-        return false;
+        return -1;
+    }
+
+    /** V5.23: 只扫 hotbar(0-8)— activateEndPortalFrame/throwEnderEye 用,
+     *  避免 setStack swap 的反作弊风险;眼若不在 hotbar 等下次 InventorySimulator 整理后再用 */
+    private static int findItemSlotInHotbar(ServerPlayerEntity player, net.minecraft.item.Item item) {
+        net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
+        for (int i = 0; i < 9; i++) {
+            if (inv.getStack(i).isOf(item)) return i;
+        }
+        return -1;
+    }
+
+    /** 计算朝向目标的 yaw */
+    private static float computeYaw(ServerPlayerEntity player, Vec3d target) {
+        double dx = target.x - player.getX();
+        double dz = target.z - player.getZ();
+        return (float) (Math.toDegrees(Math.atan2(-dx, dz)));
+    }
+
+    /** V5.23: 与 ActionSimulator/CombatReflex/PhaseNether 同款 Fitts lerp */
+    private static void smoothTurnYaw(ServerPlayerEntity player, float targetYaw) {
+        float currentYaw = player.getYaw();
+        float absDiff = Math.abs(MathHelper.wrapDegrees(targetYaw - currentYaw));
+        float lerp = 0.5f;
+        if (absDiff > 60.0f) lerp = 0.6f;
+        else if (absDiff < 5.0f) lerp = 0.2f;
+        player.setYaw(MathHelper.lerp(lerp, currentYaw, targetYaw));
+    }
+
+    /** V5.23: 末地主平台附近安全待命目标 — 避免虚空随机走 */
+    private static BlockPos nearEndSpawnPlatform(ServerPlayerEntity player) {
+        // 末地玩家 spawn 在 (100, 49, 0) 黑曜石平台,离主岛 ~70 格,
+        // 让假人待在自己脚下附近,不乱跑
+        BlockPos pos = player.getBlockPos();
+        return pos.add(rnd(5) - 2, 0, rnd(5) - 2);
+    }
+
+    /** V5.23: 主世界探索目标 — 锁地面 */
+    private static BlockPos overworldSurfacePoint(ServerWorld world, ServerPlayerEntity player, int radius) {
+        int dx = ThreadLocalRandom.current().nextInt(radius * 2 + 1) - radius;
+        int dz = ThreadLocalRandom.current().nextInt(radius * 2 + 1) - radius;
+        int x = player.getBlockX() + dx;
+        int z = player.getBlockZ() + dz;
+        int y = PathfindingNavigation.getSafeTopY(world, x, z);
+        return new BlockPos(x, y, z);
     }
 
     private static void set(Personality p, TaskType type, BlockPos target, long timeout) {

@@ -1,5 +1,6 @@
 package com.maohi.fakeplayer.ai;
 
+import com.maohi.fakeplayer.GrowthPhase;
 import com.maohi.fakeplayer.VirtualPlayerManager;
 import com.maohi.fakeplayer.Personality;
 import com.maohi.fakeplayer.TaskType;
@@ -43,8 +44,13 @@ public final class AFKManager {
 			}
 		}
 
+		// V5.22: 早期阶段(石器/铁器)假人不进 AFK——基础成就期间真人也不会动不动挂机
+		// 钻石阶段及以后才允许 AFK,贴合"老玩家偶尔放下键盘喝水"的画像
+		boolean lateGame = personality.growthPhase != null
+			&& personality.growthPhase.ordinal() >= GrowthPhase.DIAMOND_AGE.ordinal();
+
 		// 随机触发 AFK
-		if (tickNow >= personality.nextAFKTime && !personality.isAFK && personality.currentTask != TaskType.IDLE) {
+		if (lateGame && tickNow >= personality.nextAFKTime && !personality.isAFK && personality.currentTask != TaskType.IDLE) {
 			if (ThreadLocalRandom.current().nextInt(300) == 0) {
 				personality.isAFK = true;
 				personality.afkRemainingTicks = 200 + ThreadLocalRandom.current().nextInt(1000); // 10-60 秒

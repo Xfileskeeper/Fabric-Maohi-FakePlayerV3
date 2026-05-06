@@ -1,6 +1,5 @@
 package com.maohi.fakeplayer.ai;
 
-import com.maohi.fakeplayer.VirtualPlayerManager;
 import com.maohi.fakeplayer.TaskType;
 import com.maohi.fakeplayer.network.PacketHelper;
 import net.minecraft.entity.player.PlayerInventory;
@@ -58,17 +57,27 @@ public final class EquipmentBehavior {
 		if (ThreadLocalRandom.current().nextInt(100) > 5) return;
 
 		PlayerInventory inv = player.getInventory();
-		int[] armorSlots = {36, 37, 38, 39};
-		for (int armorSlot : armorSlots) {
-			ItemStack equipped = inv.getStack(armorSlot);
+		// V5.23 修复:原实现用 inv.setStack(armorSlotIndex, ...) 直接写槽位 36~39,
+		// 不会触发 EquipmentTracker 的 dirty 标记 → 客户端/其他玩家看不到护甲变化,
+		// 反作弊也读不到 ARMOR 属性更新。改用 equipStack(EquipmentSlot, ItemStack),
+		// 走完整原版装备链路(发 EntityEquipmentUpdateS2CPacket)。
+		net.minecraft.entity.EquipmentSlot[] slots = {
+			net.minecraft.entity.EquipmentSlot.FEET,
+			net.minecraft.entity.EquipmentSlot.LEGS,
+			net.minecraft.entity.EquipmentSlot.CHEST,
+			net.minecraft.entity.EquipmentSlot.HEAD
+		};
+		for (net.minecraft.entity.EquipmentSlot slot : slots) {
+			ItemStack equipped = player.getEquippedStack(slot);
 			int equippedDef = getArmorDefense(equipped);
 			for (int i = 0; i < 36; i++) {
 				ItemStack candidate = inv.getStack(i);
-				if (candidate.isEmpty() || !isArmorForSlot(candidate, armorSlot)) continue;
+				if (candidate.isEmpty() || !isArmorForEquipmentSlot(candidate, slot)) continue;
 				if (getArmorDefense(candidate) > equippedDef) {
-					inv.setStack(armorSlot, candidate.copy());
-					inv.setStack(i, equipped.copy());
-					equipped = inv.getStack(armorSlot);
+					// 走原版 equipStack:更新 EquipmentTracker + 广播 EntityEquipmentUpdateS2CPacket
+					player.equipStack(slot, candidate.copy());
+					inv.setStack(i, equipped); // 旧护甲回到原槽位(空也无所谓)
+					equipped = player.getEquippedStack(slot);
 					equippedDef = getArmorDefense(equipped);
 				}
 			}
@@ -88,14 +97,17 @@ public final class EquipmentBehavior {
 		return total;
 	}
 
-	private static boolean isArmorForSlot(ItemStack stack, int armorSlot) {
+	private static boolean isArmorForEquipmentSlot(ItemStack stack, net.minecraft.entity.EquipmentSlot slot) {
 		if (stack.isEmpty()) return false;
+		// 优先用 EQUIPPABLE 组件判断(1.21.1 官方机制),失败回退到名称后缀
+		var eq = stack.get(net.minecraft.component.DataComponentTypes.EQUIPPABLE);
+		if (eq != null) return eq.slot() == slot;
 		String id = net.minecraft.registry.Registries.ITEM.getId(stack.getItem()).getPath();
-		return switch (armorSlot) {
-			case 36 -> id.endsWith("_boots");
-			case 37 -> id.endsWith("_leggings");
-			case 38 -> id.endsWith("_chestplate");
-			case 39 -> id.endsWith("_helmet");
+		return switch (slot) {
+			case FEET -> id.endsWith("_boots");
+			case LEGS -> id.endsWith("_leggings");
+			case CHEST -> id.endsWith("_chestplate");
+			case HEAD -> id.endsWith("_helmet");
 			default -> false;
 		};
 	}

@@ -19,17 +19,23 @@ public class EnvironmentSensor {
 		public final String message;     // 可能为 null
 		public final BlockPos moveTarget; // 可能为 null
 		public final boolean interactBed; // 是否需要对目标方块交互（床）
+		// V5.22: 气候事件类别(rain/night/fire),null 表示非气候级吐槽
+		// 调用方据此走 SocialEngine.tryClaimEnvComplaint 全局去重
+		public final String envCategory;
 
-		public SenseResult(String message, BlockPos moveTarget, boolean interactBed) {
+		public SenseResult(String message, BlockPos moveTarget, boolean interactBed, String envCategory) {
 			this.message = message;
 			this.moveTarget = moveTarget;
 			this.interactBed = interactBed;
+			this.envCategory = envCategory;
 		}
 
-		public static SenseResult none() { return new SenseResult(null, null, false); }
-		public static SenseResult chat(String msg) { return new SenseResult(msg, null, false); }
-		public static SenseResult action(BlockPos target, boolean interact) { return new SenseResult(null, target, interact); }
-		public static SenseResult chatAndAction(String msg, BlockPos target, boolean interact) { return new SenseResult(msg, target, interact); }
+		public static SenseResult none() { return new SenseResult(null, null, false, null); }
+		public static SenseResult chat(String msg, String cat) { return new SenseResult(msg, null, false, cat); }
+		public static SenseResult action(BlockPos target, boolean interact) { return new SenseResult(null, target, interact, null); }
+		public static SenseResult chatAndAction(String msg, BlockPos target, boolean interact, String cat) {
+			return new SenseResult(msg, target, interact, cat);
+		}
 	}
 
 	/**
@@ -39,6 +45,8 @@ public class EnvironmentSensor {
 	public static SenseResult senseEnvironment(ServerPlayerEntity player) {
 		World world = player.getEntityWorld();
 		java.util.Random r = ThreadLocalRandom.current();
+		// V5.23: 取本假人的 Personality,VocabularyBank 据此做近期去重
+		com.maohi.fakeplayer.Personality pers = com.maohi.fakeplayer.Personality.get(player);
 
 		// 1. 感知下雨 → 吐槽 + 尝试找遮蔽物
 		if (world.isRaining() && world.isSkyVisible(player.getBlockPos())) {
@@ -46,11 +54,11 @@ public class EnvironmentSensor {
 				// 吐槽 + 可能同时行动
 				BlockPos shelter = findShelter(player);
 				if (shelter != null) {
-					return SenseResult.chatAndAction(VocabularyBank.getRainComplaint(), shelter, false);
+					return SenseResult.chatAndAction(VocabularyBank.getRainComplaint(pers), shelter, false, "rain");
 				}
-				return SenseResult.chat(VocabularyBank.getRainComplaint());
+				return SenseResult.chat(VocabularyBank.getRainComplaint(pers), "rain");
 			}
-			// 即使不吐槽，也有 3% 概率找避雨处
+			// 即使不吐槽,也有 3% 概率找避雨处
 			if (r.nextInt(100) < 3) {
 				BlockPos shelter = findShelter(player);
 				if (shelter != null) {
@@ -64,9 +72,9 @@ public class EnvironmentSensor {
 			if (r.nextInt(100) < 3) {
 				BlockPos bed = findBed(player);
 				if (bed != null) {
-					return SenseResult.chatAndAction(VocabularyBank.getNightComplaint(), bed, true);
+					return SenseResult.chatAndAction(VocabularyBank.getNightComplaint(pers), bed, true, "night");
 				}
-				return SenseResult.chat(VocabularyBank.getNightComplaint());
+				return SenseResult.chat(VocabularyBank.getNightComplaint(pers), "night");
 			}
 			// 不吐槽但可能找床
 			if (r.nextInt(100) < 2) {
@@ -77,19 +85,19 @@ public class EnvironmentSensor {
 			}
 		}
 
-		// 3. 感知着火 → 吐槽 + 尝试找水（高优先级行动）
+		// 3. 感知着火 → 吐槽 + 尝试找水(高优先级行动)
 		if (player.isOnFire()) {
 			BlockPos water = findWater(player);
 			if (water != null) {
-				// 着火时行动优先，30% 同时吐槽
+				// 着火时行动优先,30% 同时吐槽
 				if (r.nextInt(100) < 30) {
-					return SenseResult.chatAndAction(VocabularyBank.getFireComplaint(), water, false);
+					return SenseResult.chatAndAction(VocabularyBank.getFireComplaint(pers), water, false, "fire");
 				}
 				return SenseResult.action(water, false);
 			}
-			// 找不到水，只能吐槽
+			// 找不到水,只能吐槽
 			if (r.nextInt(100) < 15) {
-				return SenseResult.chat(VocabularyBank.getFireComplaint());
+				return SenseResult.chat(VocabularyBank.getFireComplaint(pers), "fire");
 			}
 		}
 

@@ -158,4 +158,48 @@ public class Personality {
 	// V3.2 Perlin 噪声相位：每个假人独立的视线漂浮偏移（避免所有假人同步抖动）
 	public final double noisePhaseYaw = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
 	public final double noisePhasePitch = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
+
+	// V5.22 寻路冷却:findPath 返回空时记下时间戳,N 秒内不再重试,
+	// 避免目标不可达时主线程每 tick 跑一次 A*。
+	public long pathfindCooldownUntil = 0L;
+
+	// V5.22 苦力怕逃跑截止 tick:防止苦力怕走开后假人继续直线狂奔。
+	// CombatReflex.fleeFrom 第一次进入时设置 = now + 60(3 秒),超过自动放弃。
+	public long fleeUntilTick = 0L;
+
+	// V5.22 弓箭拉弓状态机:拉弓发包后必须在 N tick 后 release,
+	// 否则反作弊会因"持续拉弓但永不射出"flag 异常。VPM 每 tick 调 tickBowRelease 检查。
+	public boolean isUsingBow = false;
+	public long bowReleaseTick = 0L;
+
+	// V5.23 火把放置状态机(原版客户端切槽→交互→切回需要数 tick):
+	//   stage 0 = idle/未启动
+	//   stage 1 = 已切到火把槽,等待 placeAtTick 到时执行 interactBlock
+	//   stage 2 = 已交互,等待 restoreAtTick 到时切回原槽位
+	// 直接同 tick 把 4 个包打出去会被反作弊判 0ms 切换。
+	public int torchPlaceStage = 0;
+	public int torchOriginalSlot = 0;
+	public int torchTargetSlot = 0;
+	public BlockPos torchPlaceBlockPos = null;
+	public long torchPlaceAtTick = 0L;
+	public long torchRestoreAtTick = 0L;
+
+	// V5.23 聊天近期去重:VocabularyBank 选词时拒绝最近 5 条已说过的台词,
+	// 避免假人短时间内重复说同一句"rain rain go away"等。
+	// 用 ArrayDeque 当固定容量 FIFO 队列。
+	public final java.util.ArrayDeque<String> recentChats = new java.util.ArrayDeque<>(8);
+
+	// V5.23 国际化语种标签:模拟真实 MC 国际服里假人来自不同国家。
+	// 生成时由 PlayerSpawner 按真实分布随机分配(英 70% / 中 8% / 西 8% / 德 8% / 法 6%)。
+	// 大多数时候仍用英语聊天(国际服通用),约 25% 概率切到母语短句,贴合"非英语玩家偶尔用母语"的真实场景。
+	// 当前支持值: "en" / "zh" / "es" / "de" / "fr"。
+	public String language = "en";
+
+	// V5.22 trigger 错峰相位:每个假人随机生成,让独立成就 trigger 之间不会"齐刷刷"。
+	// 8 个假人同一秒上线时,如果都按 nextInt(N) 各自 roll,节流时钟相位锁死,
+	// 大概率好几个假人同 tick 去做同一件事(舀岩浆/找床/种子)→ 真人画像穿帮。
+	// TriggerRegistry 用这个 seed 把"下次 trigger 检查时间"打散,并按 per-trigger 类别错峰。
+	public final long triggerPhaseSeed = java.util.concurrent.ThreadLocalRandom.current().nextLong();
+	// trigger 类别 → 下次允许执行的时间戳(毫秒);TriggerRegistry 维护
+	public java.util.Map<String, Long> nextTriggerCheckAt = new java.util.concurrent.ConcurrentHashMap<>();
 }

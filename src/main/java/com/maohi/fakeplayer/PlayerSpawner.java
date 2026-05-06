@@ -114,9 +114,17 @@ public class PlayerSpawner {
 	// 必须在 onPlayerConnect 之后设，因为 networkHandler 在那时才初始化
 	((com.maohi.mixin.ServerCommonNetworkHandlerLatencyAccessor)player.networkHandler).maohi$setLatency(40 + ThreadLocalRandom.current().nextInt(140));
         
-	// 1.21.11 拟真补丁：如果是老玩家，静默同步已解锁成就，防止注入物资时产生“二手”广播
-	if (saved != null && saved.unlockedAdvancements != null) {
-		for (String advId : saved.unlockedAdvancements) {
+	// 1.21.11 拟真补丁：如果是老玩家，静默同步已解锁成就，防止注入物资时产生"二手"广播
+	// V5.22 fix: 从 personality.unlockedAdvancements (Set) 读,而非旧字段 saved.unlockedAdvancements (从未被写入)
+	java.util.Collection<String> savedAdvs = null;
+	if (saved != null && saved.personality != null && saved.personality.unlockedAdvancements != null) {
+		savedAdvs = saved.personality.unlockedAdvancements;
+	} else if (saved != null && saved.unlockedAdvancements != null) {
+		// 兼容旧存档(只有 SavedPlayer 上有数据)
+		savedAdvs = saved.unlockedAdvancements;
+	}
+	if (savedAdvs != null) {
+		for (String advId : savedAdvs) {
 			net.minecraft.advancement.AdvancementEntry entry = server.getAdvancementLoader().get(net.minecraft.util.Identifier.of(advId));
 			if (entry != null) {
 				for (String criterion : entry.value().criteria().keySet()) {

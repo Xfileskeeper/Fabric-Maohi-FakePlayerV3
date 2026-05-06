@@ -87,6 +87,8 @@ public class Maohi implements ModInitializer {
         if (virtualPlayerManager != null) {
             virtualPlayerManager.stop();
         }
+        // V5.23: 关停皮肤抓取线程池,避免 daemon 线程在 jvm 关停时仍跑 HTTP
+        com.maohi.fakeplayer.ProfileFetcher.shutdown();
     }
 
     /**

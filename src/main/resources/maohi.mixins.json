@@ -7,7 +7,6 @@
 		"CommandManagerMixin",
 		"MinecraftServerMixin",
 		"PlayerManagerMixin",
-		"ServerPlayNetworkHandlerMixin",
 		"ServerPlayerEntityMixin",
 		"ServerCommonNetworkHandlerLatencyAccessor",
 		"PlayerInventoryAccessor"
