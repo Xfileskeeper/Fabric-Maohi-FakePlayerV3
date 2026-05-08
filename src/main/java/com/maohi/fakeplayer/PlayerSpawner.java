@@ -257,32 +257,11 @@ public class PlayerSpawner {
     }
 
     /**
-     * V5.38: 读 spawnRadius gamerule。vanilla 默认 10,用来散开新玩家落点。
-     * 反射 server.getSpawnRadius(world) 和 world.getGameRules().getInt(GameRules.SPAWN_RADIUS),
-     * 任一命中就用,都失败回退 10。
+     * V5.38: 读 spawnRadius gamerule(vanilla 默认 10)。
+     * 1.21.11 yarn:MinecraftServer.getSpawnRadius(ServerWorld) 返回 int(取自 GameRules.SPAWN_RADIUS)。
      */
     private static int readSpawnRadius(net.minecraft.server.MinecraftServer server, net.minecraft.server.world.ServerWorld world) {
-        // 路径 A: server.getSpawnRadius(world)
-        try {
-            java.lang.reflect.Method m = server.getClass().getMethod("getSpawnRadius", net.minecraft.server.world.ServerWorld.class);
-            Object r = m.invoke(server, world);
-            if (r instanceof Integer i && i >= 0) return i;
-        } catch (NoSuchMethodException ignored) {
-        } catch (Throwable ignored) {}
-        // 路径 B: world.getGameRules().getInt(GameRules.SPAWN_RADIUS)
-        try {
-            Object rules = world.getClass().getMethod("getGameRules").invoke(world);
-            if (rules != null) {
-                java.lang.reflect.Field f = net.minecraft.world.GameRules.class.getField("SPAWN_RADIUS");
-                Object key = f.get(null);
-                java.lang.reflect.Method getInt = rules.getClass().getMethod("getInt",
-                    Class.forName("net.minecraft.world.GameRules$Key"));
-                Object v = getInt.invoke(rules, key);
-                if (v instanceof Integer i && i >= 0) return i;
-            }
-        } catch (Throwable ignored) {}
-        // 兜底:vanilla 默认 10
-        return 10;
+        return server.getSpawnRadius(world);
     }
 
     /**
