@@ -135,11 +135,15 @@ public class VirtualPlayerManager {
      *   策略:每 80ms 一个 chunk 入主线程队列调 getChunkManager().getChunk(FULL, true),
      *   force=true 让 chunk 同步生成 + 反序列化 + block state ready,把首 player join 时
      *   一次性 promotion 的大头(chunk gen / NBT load / heightmap rebuild)提前分摊。
-     *   API 来源:与 PlayerSpawner.pickScatteredSpawn / PathfindingNavigation 同款,
-     *   1.21.11 yarn 上稳定可用,无需反射。
+     *   API 来源:与 PathfindingNavigation.getSafeTopY 同款 1.21.11 yarn 稳定路径,无需反射。
      *   半径 = forced spawn radius gamerule(默认 10 blocks,对应 ceil(10/16)=1 chunk 各方向),
-     *   保守起见取 max(2, ceil(radius/16) + 1) 多覆盖一圈,worldSpawn=(0,0) 时实际预热 5×5=25
-     *   chunks,与 P16 viewDistance=2 的 25 chunks 视野半径吻合,bot 首次 spawn 视野完全覆盖。
+     *   保守起见取 max(1, ceil(radius/16))。worldSpawn=(0,0) 时实际预热 3×3=9 chunks,
+     *   匹配 vanilla forced spawn area 默认覆盖。
+     *   代价权衡:9 chunks × ~280ms chunk gen ≈ 2.5s 主线程 burst,产 1 条 "Can't keep up" warn,
+     *   但完全摊在 server done → 首 bot spawn (P22 B 60s 延迟)之间的空窗期,首 bot spawn_timing
+     *   实测 ~480ms(已加载场景 40~70ms),vs 不预热时 6~12s 首 bot lag。
+     *   原 radius=2 (25 chunks ≈ 7s burst) 过度扩张:viewDistance=2 是 per-player 概念,
+     *   与 vanilla forced spawn area 无关,9 chunks 已足够。
      *   失败 fallback:任意一步异常即停止,不阻塞 server 启动。
      */
     private void startSpawnChunksPreheat() {
@@ -151,7 +155,7 @@ public class VirtualPlayerManager {
                 // worldSpawn 反射读取(与 PlayerSpawner 同语义,跨 yarn 兼容)
                 net.minecraft.util.math.BlockPos spawn = readWorldSpawnSafe(overworld);
                 int blockRadius = readSpawnRadiusSafe(overworld);
-                int chunkRadius = Math.max(2, (blockRadius + 15) / 16 + 1);
+                int chunkRadius = Math.max(1, (blockRadius + 15) / 16);
                 int spawnChunkX = spawn.getX() >> 4;
                 int spawnChunkZ = spawn.getZ() >> 4;
                 int issued = 0;
@@ -163,13 +167,13 @@ public class VirtualPlayerManager {
                             try {
                                 // ChunkStatus.FULL + force=true 同步加载/生成 chunk。
                                 //   首次新世界:触发 chunk gen 流水线(几百 ms);已加载世界:O(1) 命中缓存。
-                                //   不抛异常的稳定路径,与 PlayerSpawner.pickScatteredSpawn 同款。
+                                //   不抛异常的稳定路径,与 PathfindingNavigation.getSafeTopY 同款。
                                 overworld.getChunkManager().getChunk(cx, cz,
                                     net.minecraft.world.chunk.ChunkStatus.FULL, true);
                             } catch (Throwable ignored) {}
                         });
                         issued++;
-                        Thread.sleep(80L); // 80ms/chunk = 25 chunks 2s,把 chunk gen 摊到 2s 而非 burst
+                        Thread.sleep(80L); // 80ms/chunk,9 chunks 0.7s 入队,主线程串行 gen ~2.5s
                     }
                 }
                 org.slf4j.LoggerFactory.getLogger("Server thread").info(

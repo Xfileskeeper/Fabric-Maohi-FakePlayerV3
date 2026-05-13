@@ -222,6 +222,45 @@ public class MovementController {
 			return false;
 		}
 
+		// V5.43.5 P-3.F Y 水位 guard:bot 在 EXPLORING/IDLE 时若已沉到 floor 以下,立即顶
+		//   stuckTicks=600 触发 stage 2 teleport rescue,跳过 15s stage 1 等待。
+		//   日志证据(本次 P22 跑测): 7 bots 全部从 spawn y=63/64 在 30s 内沉到 y=34~51,平均 60s 后
+		//     stuck_kick。每次 stuck 阶梯都要 15s(stage 1)+ 15s(stage 2),P20 D-skip 阈值 > 8 把
+		//     deltaY=14~29 的 rescue 全挡了 → kick。
+		//   guard 协同 setExplore 锚定 surface y(P-3.F PhaseStoneAge 修复):bot 接到的 target.y 永远是
+		//     地表,所以"pos.y < floor"等价于"bot 在地表锚点 10 格以下" = 真的掉进 cave。guard 直接顶
+		//     stage 2 入口,配合 D-skip 阈值放宽(本提交同时改)立即 teleport 救回 surface。
+		//   只对 EXPLORING/IDLE 启用:MINING/COLLECTING/CRAFTING/HUNTING 都可能合法下楼(挖矿/捡掉落物
+		//     /合成/追怪到坑),不应误伤。
+		//   stuckEscalation < 2 守门:已 teleport 过的 bot 不再 guard 顶,避免循环 teleport;
+		//     bot 重新动起来(movedSq>=0.0001 in handleStuckDetection)escalation 自动归零,下次掉 cave
+		//     guard 再起作用。
+		if (pers != null
+				&& (pers.currentTask == com.maohi.fakeplayer.TaskType.EXPLORING
+					|| pers.currentTask == com.maohi.fakeplayer.TaskType.IDLE)
+				&& pers.stuckEscalation < 2) {
+			// NaN 哨兵 → 首次进入此 bot 的 EXPLORING/IDLE 路径时锚定基准(spawn y - 10 格缓冲)。
+			//   10 格容忍正常山地起伏 + 1~2 格台阶下沉 + 短暂跳坑;真实合法下行(挖矿/采矿入坑)走的是
+			//   MINING/COLLECTING task 不查 guard。transient 字段,re-spawn / 重连后通过 NaN 自然重锚。
+			if (Double.isNaN(pers.heightFloorY)) {
+				pers.heightFloorY = pos.y - 10.0;
+			}
+			if (pos.y < pers.heightFloorY) {
+				// 顶到 stage 2 入口,下 tick handleStuckDetection 立即尝试 teleport rescue。
+				// 仅首次顶时 log,避免重复刷屏(stage 2 cooldown 不过时 stuckTicks 继续累到 1200 kick)。
+				if (pers.stuckTicks < 600) {
+					com.maohi.fakeplayer.TaskLogger.log(p, "sink_guard",
+						"y", String.format("%.1f", pos.y),
+						"floorY", String.format("%.1f", pers.heightFloorY),
+						"targetY", target.getY(),
+						"task", pers.currentTask);
+					pers.stuckTicks = 600;
+				}
+				stopMovement(p);
+				return false;
+			}
+		}
+
 		// ★ A* 路径跟随：如果有缓存路径且目标未变，沿路径走
 		BlockPos nextWaypoint = target;
 		if (pers != null) {
@@ -506,18 +545,18 @@ public class MovementController {
 					world, botPos.getX(), botPos.getZ(), Integer.MIN_VALUE);
 				if (surfaceY != Integer.MIN_VALUE && surfaceY > p.getBlockY() + 2) {
 					int deltaY = surfaceY - p.getBlockY();
-					// P20 D-skip: ΔY>8 的 teleport 会触发 main thread 2-3s 的 tracking re-init + 后续
-					//   远征行进的 chunk-flood lag(日志 06:29:11 / 06:29:42 / 06:33:27 三次跨 29 格
-					//   teleport 各跟 2.7s+ lag)。这种大跨度 rescue 改成放弃 stage 2,等 stuckTicks
-					//   累到 1200 走 stage 3 kick → saved=true 重连(stage 3 已清 taskTarget,
-					//   重连后从 phase_change 干净起步,无远征点遗留)。escalation 推到 2,避免后续 tick
-					//   反复进 stage 2 检查浪费 CPU。
-					if (deltaY > 8) {
+					// V5.43.5 P-3.F D-skip 阈值放宽:8 → 32。本次 P22 跑测里 7 bots 都死于 deltaY=14~29
+					//   被旧 8 阈值挡掉 → kick。32 阈值能救所有 log 案例(deltaY ≤ 29);超过 32 仍
+					//   skip kick(深 cave 救援的 chunk-flood lag 不划算,kick + 重 spawn 更安全)。
+					// 原 P20 D-skip 注释保留参考:ΔY>8 的 teleport 会触发 main thread 2-3s tracking re-init +
+					//   后续远征行进的 chunk-flood lag(日志 06:29:11/06:29:42/06:33:27 三次跨 29 格
+					//   teleport 各跟 2.7s+ lag)。但比起 bot 全部 kick → re-spawn → 再 kick 死循环,
+					//   一次 lag 换 bot 救援是 net win。下方 lagFreezeUntil 同步 5s → 8s 增加 lag 缓冲。
+					if (deltaY > 32) {
 						pers.stuckEscalation = 2;
-						// P20 D-skip-accel: 跳过 30s 等待,把 stuckTicks 直接顶到 1199 让下 1~2 tick
-						//   stage 3 立刻 kick。stage 2 入口已 hasNearbyRealObserver(32) 通过 → 此处
-						//   1s 内 kick 真人路过概率极低,不形成"凭空消失"指纹。bot 卡 30s 后断线 比
-						//   卡 60s 后断线 更像真人 Alt+F4 行为。
+						// 跳过 30s 等待,把 stuckTicks 直接顶到 1199 让下 1~2 tick stage 3 立刻 kick。
+						// stage 2 入口已 hasNearbyRealObserver(32) 通过 → 此处 1s 内 kick 真人路过概率
+						// 极低,不形成"凭空消失"指纹。bot 卡 30s 后断线 比 卡 60s 后断线 更像真人 Alt+F4 行为。
 						pers.stuckTicks = 1199;
 						com.maohi.fakeplayer.TaskLogger.log(p, "stuck_teleport_skip",
 							"reason", "delta_y_too_large",
@@ -536,12 +575,14 @@ public class MovementController {
 					pers.currentTask = com.maohi.fakeplayer.TaskType.IDLE;
 					pers.taskTarget = null;
 					pers.currentPath.clear();
-					// P20 D-freeze: teleport 落地后 5s 冻结 AI 决策入队,给 vanilla tracking re-init
+					// P20 D-freeze: teleport 落地后冻结 AI 决策入队,给 vanilla tracking re-init
 					//   留出干净的 main thread 窗口(同 P19 spawn freeze 语义,manageLoop:212 已有
 					//   `tickNow < lagFreezeUntil` continue 跳过)。原行为:teleport 后下一 tick AI 立刻
-					//   排 doSmartMove,与 tracking 撞 main thread → 2.7s 级 lag。ΔY ≤ 8 的小幅
-					//   teleport 走到这里,5s 冻结后才允许新任务/移动。
-					pers.lagFreezeUntil = nowMs + 5_000L;
+					//   排 doSmartMove,与 tracking 撞 main thread → 2.7s 级 lag。
+					// V5.43.5 P-3.F: 5s → 8s。阈值放宽到 32 后单次 teleport 跨度可能比原 P20 设计大 4 倍,
+					//   chunk-flood lag 也会成比例放大。8s freeze 给 vanilla tracking re-init + chunk
+					//   loading 更宽窗口,避免后续 AI 决策与 lag 抢线。
+					pers.lagFreezeUntil = nowMs + 8_000L;
 					com.maohi.fakeplayer.TaskLogger.log(p, "stuck_teleport",
 						"from_y", String.format("%.1f", pos.y),
 						"to_y", String.format("%.1f", newY),

@@ -295,6 +295,19 @@ public class Personality {
 	// 上次 stuck-teleport 时间(wall-clock ms)。10 分钟内不重复 teleport,避免 bug 循环触发。
 	public transient long lastStuckTeleportAt = 0L;
 
+	// V5.43.5 P-3.E Y 水位 guard 基准:bot 不允许低于此 y 时仍朝同高度/更低 target 走。
+	//   背景:这次 P22 测试发现 7 bots 全部从 spawn(y=63/64)在 30s 内沉到 y=34~51 被 kick。
+	//     根因不是 isDangerAhead 不严(那个 y-2 漏洞已在 P-3.E bug 修复),而是 setExplore 用
+	//     bot 当前 y 选 target → bot 一旦掉进 cave 顶部,reassign 给的 target.y 跟着掉 → bot
+	//     在 cave 里反复 stuck_blacklist 走不出来 → 1200 ticks 后 stuck_kick。
+	//   guard 语义:首次 doSmartMove 时锚定 = spawn y - 10(留 10 格缓冲允许小山地起伏);bot 走低于
+	//     基准且 target.y 也 ≤ 基准时,拉黑 target + 设 task=IDLE 强迫上层重选(理想情况下下次
+	//     assign 会选远 + 高的 force_explore target,把 bot 从 cave 拉回 surface)。
+	//   不上抬:bot 短暂爬山再下来不应该被卡死,所以基准固定从 spawn 起。MINING/COLLECTING 等真
+	//     合法下楼的 task 不触发 guard(只 EXPLORING/IDLE 查),避免误伤洞采。
+	//   transient:仅本会话内存,re-spawn / 重连后通过 NaN 哨兵自然重新锚定。
+	public transient double heightFloorY = Double.NaN;
+
 	// V5.30 W2S 收尾:熔炉落地状态机(同 table 节奏)。FURNACE 是 STONE_AGE→IRON_AGE 唯一桥梁,
 	// 不放下来 SmeltingBehavior.findFurnace 永远 null,raw_iron 堆背包。
 	public int furnacePlaceStage = 0;

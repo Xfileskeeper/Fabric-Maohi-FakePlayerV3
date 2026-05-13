@@ -125,9 +125,18 @@ public class PathfindingNavigation {
 		if (!isChunkFullyLoaded(world, pos)) {
 			return true;
 		}
-		// 1. 检测是否会跌落超过 3 格
+		// 1. 检测是否会跌落超过 3 格 — 必须 y-1/y-2/y-3 三格都 air 才算 danger
+		// V5.43.5 P-3.E bug 修复: 原 `below.isAir() && below.down(2).isAir()` 跳过了 y-2,
+		//   检测的是 y-1 + y-3 两点而非 y-1/y-2/y-3 连续。
+		//   误判情形(被本 bug 害)— y-1 air, y-2 solid, y-3 air:y-2 是一块凸出于深洞顶端的孤立方块,
+		//     bot 只下 1 格就站住,完全安全;但旧条件把它判 danger → bot 不肯走出口。
+		//   反例自查 — y-1 air, y-2 air, y-3 solid(2 格落差):below.isAir() ✓ 但 below.down(2)
+		//     = solid → 旧条件 false ✓ 走通,新条件依旧 false ✓ 走通,行为不变。
+		//   反例自查 — y-1/y-2/y-3 全 air(≥3 格悬崖):新旧条件都 true,行为不变。
 		BlockPos below = pos.down();
-		if (world.getBlockState(below).isAir() && world.getBlockState(below.down(2)).isAir()) {
+		if (world.getBlockState(below).isAir()
+				&& world.getBlockState(below.down()).isAir()
+				&& world.getBlockState(below.down(2)).isAir()) {
 			return true;
 		}
 		// 2. 检测脚下是否是危险流体(岩浆等)或危险方块(岩浆块、火)

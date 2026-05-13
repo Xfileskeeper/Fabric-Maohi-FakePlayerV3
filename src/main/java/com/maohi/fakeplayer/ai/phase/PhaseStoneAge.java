@@ -432,16 +432,20 @@ public final class PhaseStoneAge implements Phase {
         
         int tx = bestTx;
         int tz = bestTz;
-        // V5.43.3 P-3.I: target.y 直接用 bot.y, 而非 getSafeTopY(surface)。
-        //   背景: 旧实现 ty=getSafeTopY(...) 在平原/海面世界返回 y=63。但 bot 可能 spawn 在山顶 y=84/93/95
-        //     (chunk gen 在山地/丘陵地形落点)。bot 朝 (tx, 63, tz) 走,doSmartMove 用 xz 到达判定
-        //     (line 169-171),bot 走到山顶 target.xz 算到达 → stopMovement → 永远不下山到 y=63。
-        //   日志证据(commit 7648837 跑测): GhostSilent spawn y=95, LunarPhoenix_2007 y=93 等 9 bot
-        //     全卡山顶,EXPLORING target 全 y=63,21 分钟 0 进展。
-        //   修复: target.y 用 bot.y。bot 朝 xz 方向走,y 由 vanilla 物理(行走+重力)自然处理。
-        //     不需要下山就到达,如果地形向下 bot 自然下落。EXPLORING 任务目的是"水平走出去找资源",
-        //     y 精确度不重要。
-        int ty = player.getBlockY();
+        // V5.43.5 P-3.F: target.y 恢复为 (tx,tz) 上的 surface heightmap,不再用 bot.y。
+        //   背景:V5.43.3 P-3.I 把 ty 改成 bot.y 是为修"山顶 bot 朝 y=63 走 xz 到达 stopMovement
+        //     永远不下山"的 bug,但那个 bug 已经被 V5.43.4 在 doSmartMove:196 加的
+        //     `Math.abs(dy) <= 3.0` 到达检查解决了 — 山顶 bot 走到 target.xz 时 |dy|>3 不算到达,
+        //     vanilla 重力会让 bot 沿斜坡自然下来到地表 y。P-3.I 现在是过时的补丁。
+        //   P-3.I 副作用 = 本次 log 根因:bot 走中途掉进 cave (y=46),vanilla setExplore reassign
+        //     用 bot 当前 y → target.y=46,新 target 也在 cave 高度 → bot 在 cave 反复 stuck_blacklist
+        //     → 1200 ticks stuck_kick。7 bot 平均 2 分钟 spawn→kick。
+        //   修复:target.y 用 (tx,tz) 的 MOTION_BLOCKING surface y。bot 哪怕掉进 cave,target.y 永远
+        //     锚在地表,bot 朝 surface 走;A* 找不到向上路径时由 stuck stage 2 teleport 兜底救回。
+        //   getSafeTopY 在 chunk 未加载时 fallback player.getBlockY(),等价 P-3.I 旧行为,不破除原
+        //     "(0,0,0) 异常 spawn 在 y=0 平面打转" 兜底语义。
+        int ty = com.maohi.fakeplayer.ai.PathfindingNavigation.getSafeTopY(
+            player.getEntityWorld(), tx, tz, player.getBlockY());
         p.currentTask = TaskType.EXPLORING;
         p.taskTarget = new BlockPos(tx, ty, tz);
         p.taskExpireTime = player.getEntityWorld().getServer().getTicks() + TimingConstants.TICK_TIMEOUT_EXPLORE;
