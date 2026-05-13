@@ -2039,11 +2039,28 @@ prepareAndSpawnVirtualPlayer();
                 if (minedType.endsWith("_log") || minedType.endsWith("_wood")) {
                     server.execute(() -> {
                         net.minecraft.advancement.AdvancementEntry adv = server.getAdvancementLoader().get(net.minecraft.util.Identifier.of("minecraft", "story/mine_wood"));
-                        if (adv != null && !p.getAdvancementTracker().getProgress(adv).isDone()) {
+                        // P22 诊断:实事求是测 9 mine_done / 0 ach 链路断点
+                        //   advNull=true → AdvancementLoader 找不到 minecraft:story/mine_wood
+                        //   alreadyDone=true → 之前已经 done 但 sync 没抄到 personality(sync 端 bug)
+                        //   unobtainedBefore>0 + alreadyDone(after)=true → grant 路径 OK,sync 端 bug
+                        boolean advNull = (adv == null);
+                        boolean alreadyDone = adv != null && p.getAdvancementTracker().getProgress(adv).isDone();
+                        int unobtainedBefore = 0;
+                        boolean doneAfter = alreadyDone;
+                        if (adv != null && !alreadyDone) {
+                            java.util.List<String> crits = new java.util.ArrayList<>();
                             for (String crit : p.getAdvancementTracker().getProgress(adv).getUnobtainedCriteria()) {
+                                crits.add(crit);
+                            }
+                            unobtainedBefore = crits.size();
+                            for (String crit : crits) {
                                 p.getAdvancementTracker().grantCriterion(adv, crit);
                             }
+                            doneAfter = p.getAdvancementTracker().getProgress(adv).isDone();
                         }
+                        com.maohi.fakeplayer.TaskLogger.log(p, "p11_grant_attempt",
+                            "advNull", advNull, "alreadyDone", alreadyDone,
+                            "unobtainedBefore", unobtainedBefore, "doneAfter", doneAfter);
                     });
                 }
 

@@ -178,6 +178,11 @@ public final class PhaseStoneAge implements Phase {
                     assignChopTree(player, personality, ctx);
                 } else {
                     // 原料齐了,IDLE 5s 等 craft 触发(下个 100-tick reassign 重新评估)
+                    // V5.43.6 P-2: 如果放置一直失败(处于冷却中), 说明脚下不适合放表, 强迫 EXPLORE 换地方
+                    if (player.getEntityWorld().getTime() < personality.tablePlaceRetryCooldownUntil) {
+                         setExplore(personality, player);
+                         return;
+                    }
                     setIdle(personality, player, 100);
                 }
             }

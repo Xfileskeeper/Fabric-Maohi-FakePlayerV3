@@ -206,6 +206,9 @@ public class BlockPlacer {
 			return;
 		}
 
+		// planA P-2: 放置冷却检查
+		if (now < personality.tablePlaceRetryCooldownUntil) return;
+
 		// planA P-1 诊断:节流 30s(600 tick)一条 table_place_skip,看 bot 卡在哪个 gate
 		String diagReason = null;
 
@@ -384,12 +387,31 @@ public class BlockPlacer {
 			}
 
 			PacketHelper.swingHand(player, Hand.MAIN_HAND);
+			// P22 诊断:result.toString() 出 class_9857[] (obfuscated) 看不出 Pass/Fail/Consume,
+			//   补一条 resultClass(simple name) + supportState + placeAtBeforeBreak 字段定位根因。
+			//   配 P-2 失败冷却,真实失败时能直接判断是 vanilla 拒绝(Pass/Fail) 还是 ActionResult 类型混淆。
+			net.minecraft.block.BlockState supportState = player.getEntityWorld().getBlockState(support);
 			com.maohi.fakeplayer.TaskLogger.log(player, "table_place_sent",
 				"pos", placeAt, "support", support,
 				"result", result.toString(),
+				"resultClass", result.getClass().getSimpleName(),
 				"afterBlock", afterState.getBlock().toString(),
+				"supportBlock", supportState.getBlock().toString(),
+				"supportSolid", supportState.isSolidBlock(player.getEntityWorld(), support),
 				"handItem", handStack.getItem().toString(),
 				"selectedSlot", ((PlayerInventoryAccessor) player.getInventory()).getSelectedSlot());
+
+			// P-2: 检查放置结果, 如果还是 air 说明失败了 (反作弊拦截/位置冲突)
+			if (afterState.isAir() || afterState.isReplaceable()) {
+				personality.tablePlaceFailCount++;
+				if (personality.tablePlaceFailCount >= 3) {
+					personality.tablePlaceRetryCooldownUntil = now + 200L; // 10s 冷却
+					personality.tablePlaceFailCount = 0;
+					com.maohi.fakeplayer.TaskLogger.log(player, "table_place_cooldown", "reason", "repeated_fail", "pos", placeAt);
+				}
+			} else {
+				personality.tablePlaceFailCount = 0; // 成功则清零
+			}
 
 			personality.tableRestoreAtTick = now + RESTORE_DELAY_MIN
 				+ ThreadLocalRandom.current().nextInt(RESTORE_DELAY_MAX - RESTORE_DELAY_MIN + 1);

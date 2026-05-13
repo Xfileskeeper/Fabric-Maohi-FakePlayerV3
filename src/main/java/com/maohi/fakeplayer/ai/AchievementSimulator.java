@@ -62,8 +62,18 @@ public final class AchievementSimulator {
 		for (String adv : ADV_SEQUENCE) {
 			if (personality.unlockedAdvancements.contains(adv)) continue;
 			AdvancementEntry entry = server.getAdvancementLoader().get(Identifier.of(adv));
-			if (entry == null) continue;
-			if (p.getAdvancementTracker().getProgress(entry).isDone()) {
+			if (entry == null) {
+				// P22 诊断:Identifier.of(adv) 单参解析 + AdvancementLoader.get 链路是否返回 entry
+				//   如果首次出现 = 单参 Identifier 解析失败或 loader 在 fake player 上下文无效
+				com.maohi.fakeplayer.TaskLogger.log(p, "sync_entry_null", "id", adv);
+				continue;
+			}
+			boolean done = p.getAdvancementTracker().getProgress(entry).isDone();
+			// P22 诊断:每次 sync 实测每档 ach done 状态
+			//   预期:mine_wood 在 P11 grant 后下一次 sync done=true → 进 if 分支记 unlock
+			//   反例:连续多次 done=false → 跨调用状态丢失或 P11 grant 没生效
+			com.maohi.fakeplayer.TaskLogger.log(p, "sync_check", "id", adv, "done", done);
+			if (done) {
 				personality.unlockedAdvancements.add(adv);
 				personality.hasUnlockedThisSession = true;
 				newlyObserved++;
