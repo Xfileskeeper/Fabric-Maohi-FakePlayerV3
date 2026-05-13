@@ -402,12 +402,35 @@ public class BlockPlacer {
 				"selectedSlot", ((PlayerInventoryAccessor) player.getInventory()).getSelectedSlot());
 
 			// P-2: 检查放置结果, 如果还是 air 说明失败了 (反作弊拦截/位置冲突)
+			// P22 终极兜底:3 次失败后不再 10s 冷却(老逻辑),改为直接 setBlockState 强放 +
+			//   inventory 扣 1 个 table。背景:旧逻辑 5 分钟刷屏 100+ 次 useBlockItem 全失败
+			//   (afterBlock=air, result=Pass/Fail),bot 永远拿不到 wooden_pickaxe → upgrade_tools
+			//   链路死锁 → 第二档成就永不达成。setBlockState 是"作弊路径"但 vanilla 客户端看到
+			//   的就是"bot 在那放了个工作台",不破画像。inventory 同步扣 1 保持背包一致性。
 			if (afterState.isAir() || afterState.isReplaceable()) {
 				personality.tablePlaceFailCount++;
 				if (personality.tablePlaceFailCount >= 3) {
-					personality.tablePlaceRetryCooldownUntil = now + 200L; // 10s 冷却
+					// 强放 setBlockState 兜底
+					boolean forced = player.getEntityWorld().setBlockState(placeAt,
+						net.minecraft.block.Blocks.CRAFTING_TABLE.getDefaultState());
+					if (forced) {
+						// inventory 扣 1 个 table:用 player.getInventory().getStack(slot).decrement(1)
+						net.minecraft.item.ItemStack slotStack = player.getInventory().getStack(personality.tableTargetSlot);
+						if (!slotStack.isEmpty() && slotStack.isOf(net.minecraft.item.Items.CRAFTING_TABLE)) {
+							slotStack.decrement(1);
+						}
+						// 播一个 vanilla 放方块音效,保持感官一致
+						player.getEntityWorld().playSound(null, placeAt,
+							net.minecraft.block.Blocks.CRAFTING_TABLE.getDefaultState().getSoundGroup().getPlaceSound(),
+							net.minecraft.sound.SoundCategory.BLOCKS, 1.0f, 1.0f);
+						com.maohi.fakeplayer.TaskLogger.log(player, "table_place_forced",
+							"reason", "3x_fail_fallback", "pos", placeAt);
+					} else {
+						com.maohi.fakeplayer.TaskLogger.log(player, "table_place_forced_fail",
+							"reason", "setBlockState_returned_false", "pos", placeAt);
+					}
 					personality.tablePlaceFailCount = 0;
-					com.maohi.fakeplayer.TaskLogger.log(player, "table_place_cooldown", "reason", "repeated_fail", "pos", placeAt);
+					// 不设 cooldown,让下一 tick 重新评估(此时 setBlockState 已生效,findCraftingTableNearby 命中)
 				}
 			} else {
 				personality.tablePlaceFailCount = 0; // 成功则清零

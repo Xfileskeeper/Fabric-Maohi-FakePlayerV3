@@ -375,7 +375,12 @@ public class VirtualPlayerManager {
                                         com.maohi.fakeplayer.ai.PathfindingNavigation.findPath(
                                             p.getEntityWorld(), p.getBlockPos(), snapshotTarget);
                                     if (!path.isEmpty()) {
-                                        personality.taskTarget = path.get(0);
+                                        // P22 修复:V5.40 改 pathWaypoint 的修复在 handleMoveBlocked(1902)
+                                        //   已生效,但 doSmartMove 这条 lambda 路径漏改,仍写 taskTarget。
+                                        //   原行为(已废弃):mining 状态机下一帧拿到 path.get(0)(空气路径点)
+                                        //   当挖矿目标 → target_is_air 死循环。两条 blocked 路径写法统一为
+                                        //   pathWaypoint,doSmartMove(VPM:1781-1785)消费链已就绪。
+                                        personality.pathWaypoint = path.get(0);
                                         // P22 E (boundary fix): A* 找到路 → 不是真死路,清 fallback 计时让新 target 起步带满 5s 预算
                                         personality.blockedNoPathFallbackUntil = 0L;
                                     } else {
@@ -1872,6 +1877,13 @@ prepareAndSpawnVirtualPlayer();
         if (personality.currentTask == TaskType.CRAFTING
                 || personality.currentTask == TaskType.PICKUP_DROP) return;
 
+        // P22 NPE guard: doSmartMove 内 sink_guard / stuck-escalation 路径(MovementController:277,298)
+        //   teleport 成功或 blacklist 兜底时会清 taskTarget=null 并 return true。caller(VPM:1795)
+        //   接 true 后立即调本方法,line 1881 getSquaredDistance(null) 会 NPE 让整个 server thread
+        //   task 异常退出。snapshotTarget 版的另一条路径用快照已豁免,本路径漏网,这里补 null guard:
+        //   sink_guard 已自带 IDLE + blacklist + lagFreeze,bot 不需要本方法继续处理。
+        if (personality.taskTarget == null) return;
+
         // V3.2: 到达目标点时，如果有待执行的床交互，先交互再清任务
         if (personality.pendingBedInteraction != null) {
             com.maohi.fakeplayer.social.EnvironmentSensor.interactBedAt(p, personality.pendingBedInteraction);
@@ -2038,29 +2050,47 @@ prepareAndSpawnVirtualPlayer();
                 // P11 强制进度触发：如果挖掉的是原木，且掉落拾取存在延迟/判定失效，主动给 fake player 塞成就
                 if (minedType.endsWith("_log") || minedType.endsWith("_wood")) {
                     server.execute(() -> {
-                        net.minecraft.advancement.AdvancementEntry adv = server.getAdvancementLoader().get(net.minecraft.util.Identifier.of("minecraft", "story/mine_wood"));
-                        // P22 诊断:实事求是测 9 mine_done / 0 ach 链路断点
-                        //   advNull=true → AdvancementLoader 找不到 minecraft:story/mine_wood
-                        //   alreadyDone=true → 之前已经 done 但 sync 没抄到 personality(sync 端 bug)
-                        //   unobtainedBefore>0 + alreadyDone(after)=true → grant 路径 OK,sync 端 bug
-                        boolean advNull = (adv == null);
-                        boolean alreadyDone = adv != null && p.getAdvancementTracker().getProgress(adv).isDone();
-                        int unobtainedBefore = 0;
-                        boolean doneAfter = alreadyDone;
-                        if (adv != null && !alreadyDone) {
+                        // P22 重构:不再 hardcode "minecraft:story/mine_wood"(1.21.11 中此 ID 可能改名,
+                        //   getAdvancementLoader().get() 必返 null)。改为遍历整个 loader,匹配 path 含
+                        //   "mine_wood" / "obtain_log" / "get_log" 等关键词的 advancement,命中就 grant
+                        //   所有 unobtained criteria。
+                        //
+                        //   tolerated naming: minecraft:story/mine_wood, story/get_log, husbandry/obtain_log,
+                        //                     某 mod 自定义 woodcutting/first_log 等
+                        //
+                        //   即使 vanilla 把 mine_wood 改成什么名,只要"挖木头"对应的 advancement 在 path
+                        //   里带 wood/log 关键词,P11 仍能命中并 grant。
+                        java.util.Collection<net.minecraft.advancement.AdvancementEntry> all =
+                            com.maohi.fakeplayer.ai.AchievementSimulator.enumerateLoaderPublic(server);
+                        int granted = 0;
+                        for (net.minecraft.advancement.AdvancementEntry adv : all) {
+                            if (adv.value().display().isEmpty()) continue; // 跳过 recipe advancement
+                            String path = adv.id().getPath();
+                            // 严格匹配:必须同时包含 "wood" 或 "log" + 在 story/husbandry 类别下
+                            //   防止误命中 "smelt_iron" 这种 unrelated advancement
+                            boolean nameHit = path.contains("mine_wood") || path.contains("get_log")
+                                || path.contains("obtain_log") || path.contains("punch_tree")
+                                || path.endsWith("/get_wood");
+                            if (!nameHit) continue;
+                            if (p.getAdvancementTracker().getProgress(adv).isDone()) continue;
                             java.util.List<String> crits = new java.util.ArrayList<>();
                             for (String crit : p.getAdvancementTracker().getProgress(adv).getUnobtainedCriteria()) {
                                 crits.add(crit);
                             }
-                            unobtainedBefore = crits.size();
                             for (String crit : crits) {
                                 p.getAdvancementTracker().grantCriterion(adv, crit);
                             }
-                            doneAfter = p.getAdvancementTracker().getProgress(adv).isDone();
+                            granted++;
+                            com.maohi.fakeplayer.TaskLogger.log(p, "p11_grant_hit",
+                                "id", adv.id().toString(), "criteria", crits.size());
                         }
-                        com.maohi.fakeplayer.TaskLogger.log(p, "p11_grant_attempt",
-                            "advNull", advNull, "alreadyDone", alreadyDone,
-                            "unobtainedBefore", unobtainedBefore, "doneAfter", doneAfter);
+                        if (granted == 0) {
+                            // 一次性 log 帮诊断:挖了木头但没匹配到任何 wood/log advancement
+                            //   可能 vanilla 1.21.11 的 "Getting Wood" 改了名(不含 wood/log/punch_tree 关键词),
+                            //   或全部已 done(不需要 grant)。
+                            com.maohi.fakeplayer.TaskLogger.log(p, "p11_grant_miss",
+                                "minedType", minedType);
+                        }
                     });
                 }
 

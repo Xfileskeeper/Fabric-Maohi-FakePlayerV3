@@ -238,7 +238,12 @@ public class PathfindingNavigation {
 
 		AStarNode startNode = new AStarNode(start, 0, heuristic(start, goal), null);
 		openSet.add(startNode);
-		visited.put(blockPosKey(start), startNode);
+		// P22 修复:visited key 改 BlockPos.asLong() (vanilla 26X+12Y+26Z bit-packed long)。
+		//   原 blockPosKey 只打 X/Z,getNeighbors 含 up/down/up(2) 时同一 XZ 列不同 Y 节点折叠
+		//   成同一 visited entry → 任意一个被访问后,该列其他高度全被剪 → cave/树冠/楼梯跨 Y
+		//   寻路被错误剪枝(jungle blocked_no_path 死循环的根因)。PATH_CACHE key 已在 V5.41
+		//   加 Y 桶,visited 漏改是半截修复。
+		visited.put(start.asLong(), startNode);
 
 		int steps = 0;
 		while (!openSet.isEmpty() && steps < MAX_SEARCH_STEPS) {
@@ -258,7 +263,8 @@ public class PathfindingNavigation {
 
 			// V5.23: 邻居附带 cost — 优先平地,跳跃/跨越走 cost 阶梯
 			for (Neighbor nb : getNeighbors(current.pos)) {
-				long key = blockPosKey(nb.pos);
+				// P22 修复:同 startNode put,visited key 改 asLong() 保留 Y 维度,避免不同高度折叠
+				long key = nb.pos.asLong();
 				double tentativeG = current.g + nb.cost;
 
 				AStarNode existing = visited.get(key);

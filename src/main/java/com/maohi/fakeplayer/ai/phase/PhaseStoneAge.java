@@ -387,6 +387,18 @@ public final class PhaseStoneAge implements Phase {
      *   5 次仍命中(理论上罕见,周围全标空才会发生)→ 接受最后一次结果,等 region TTL 过期。
      */
     private static void setExplore(Personality p, ServerPlayerEntity player) {
+        // P23-D: 丛林叶子包围预检
+        if (isTrappedByLeaves(player)) {
+            BlockPos leafTarget = findAdjacentLeaf(player);
+            if (leafTarget != null) {
+                p.currentTask = TaskType.WOODCUTTING;
+                p.taskTarget = leafTarget;
+                p.taskExpireTime = player.getEntityWorld().getServer().getTicks() + 60; // 3s 短任务
+                com.maohi.fakeplayer.TaskLogger.log(player, "explore_leaf_break", "target", leafTarget);
+                return;
+            }
+        }
+
         Personality.pruneScannedEmptyRegions(p);
         ThreadLocalRandom rng = ThreadLocalRandom.current();
         int bestTx = player.getBlockX();
@@ -464,5 +476,49 @@ public final class PhaseStoneAge implements Phase {
         p.currentTask = TaskType.EXPLORING;
         p.taskTarget = new BlockPos(tx, ty, tz);
         p.taskExpireTime = player.getEntityWorld().getServer().getTicks() + TimingConstants.TICK_TIMEOUT_EXPLORE;
+    }
+
+    private static boolean isTrappedByLeaves(ServerPlayerEntity player) {
+        int leafCount = 0;
+        int blockedCount = 0;
+        ServerWorld world = player.getEntityWorld();
+        BlockPos pos = player.getBlockPos();
+        
+        for (net.minecraft.util.math.Direction dir : new net.minecraft.util.math.Direction[]{
+                net.minecraft.util.math.Direction.NORTH, net.minecraft.util.math.Direction.SOUTH, net.minecraft.util.math.Direction.EAST, net.minecraft.util.math.Direction.WEST}) {
+            BlockPos side = pos.offset(dir);
+            BlockPos sideUp = side.up();
+            net.minecraft.block.BlockState state1 = world.getBlockState(side);
+            net.minecraft.block.BlockState state2 = world.getBlockState(sideUp);
+            
+            boolean blocked = !state1.getCollisionShape(world, side).isEmpty() || !state2.getCollisionShape(world, sideUp).isEmpty();
+            if (blocked) blockedCount++;
+            
+            if (state1.isIn(net.minecraft.registry.tag.BlockTags.LEAVES) || state2.isIn(net.minecraft.registry.tag.BlockTags.LEAVES)) {
+                leafCount++;
+            }
+        }
+        
+        // 四面都被堵住，且至少有一面是叶子，才认为被叶子困住
+        return blockedCount >= 4 && leafCount > 0;
+    }
+
+    private static BlockPos findAdjacentLeaf(ServerPlayerEntity player) {
+        ServerWorld world = player.getEntityWorld();
+        BlockPos pos = player.getBlockPos();
+        
+        for (net.minecraft.util.math.Direction dir : new net.minecraft.util.math.Direction[]{
+                net.minecraft.util.math.Direction.NORTH, net.minecraft.util.math.Direction.SOUTH, net.minecraft.util.math.Direction.EAST, net.minecraft.util.math.Direction.WEST}) {
+            BlockPos side = pos.offset(dir);
+            BlockPos sideUp = side.up();
+            
+            if (world.getBlockState(sideUp).isIn(net.minecraft.registry.tag.BlockTags.LEAVES)) {
+                return sideUp;
+            }
+            if (world.getBlockState(side).isIn(net.minecraft.registry.tag.BlockTags.LEAVES)) {
+                return side;
+            }
+        }
+        return null;
     }
 }
