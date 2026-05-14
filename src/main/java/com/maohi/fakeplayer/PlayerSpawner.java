@@ -168,21 +168,18 @@ public class PlayerSpawner {
         
 	// 1.21.11 拟真补丁：如果是老玩家，静默同步已解锁成就，防止注入物资时产生"二手"广播
 	// V5.22 fix: 从 personality.unlockedAdvancements (Set) 读,而非旧字段 saved.unlockedAdvancements (从未被写入)
-	java.util.Collection<String> savedAdvs = null;
-	if (saved != null && saved.personality != null && saved.personality.unlockedAdvancements != null) {
-		savedAdvs = saved.personality.unlockedAdvancements;
-	} else if (saved != null && saved.unlockedAdvancements != null) {
-		// 兼容旧存档(只有 SavedPlayer 上有数据)
-		savedAdvs = saved.unlockedAdvancements;
-	}
-	if (savedAdvs != null) {
-		for (String advId : savedAdvs) {
-			net.minecraft.advancement.AdvancementEntry entry = server.getAdvancementLoader().get(net.minecraft.util.Identifier.of(advId));
-			if (entry != null) {
-				for (String criterion : entry.value().criteria().keySet()) {
-					player.getAdvancementTracker().grantCriterion(entry, criterion);
-				}
-			}
+	// P23 重构: 1.21.11 上 direct_grant 写入的逻辑 ID (如 "story/iron_source") 在
+	//   vanilla advancement loader 上 getAdvancementLoader().get() 必返 null,
+	//   原本调 grantCriterion 静默失败,无副作用但也没意义。直接删除这段尝试。
+	//   兼容旧存档:把 saved.unlockedAdvancements (List) 一次性迁移到 saved.personality.unlockedAdvancements,
+	//   迁完清空 List,下次写盘 JSON 上只剩 personality 那份。
+	if (saved != null) {
+		if (saved.personality == null) saved.personality = new com.maohi.fakeplayer.Personality();
+		if (saved.unlockedAdvancements != null && !saved.unlockedAdvancements.isEmpty()) {
+			saved.personality.unlockedAdvancements.addAll(saved.unlockedAdvancements);
+			saved.unlockedAdvancements.clear();
+			com.maohi.fakeplayer.TaskLogger.log(player, "adv_legacy_migrated",
+				"count", saved.personality.unlockedAdvancements.size());
 		}
 	}
 

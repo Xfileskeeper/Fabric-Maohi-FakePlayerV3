@@ -290,6 +290,14 @@ public class MovementController {
 				// cooldown 内 / 有真人观察者 / deltaY>32 → blacklist target + IDLE 让 reassign 救场。
 				//   每 5s reassign 一次,期间 bot 在 IDLE(guard 不再触发 spam),5s 后新 EXPLORING target
 				//   触发新一轮 guard 检查。多次 blacklist 累积 failedTargets,setExplore 被迫选别处。
+				// P22 修复:走 blacklist 路径时把 heightFloorY 上抬到当前 y - 2。
+				//   背景:Ava2012 case — bot spawn 在 y=67,floorY=57,走到地势偏低区 y=55(合法表面,
+				//     不是 cave)。guard 触发条件 pos.y < floorY=57 满足,但 surfaceY <= bot.y+2(bot
+				//     已经在表面)→ teleport 跳过 → blacklist。但 floorY 不变,下次 reassign 又 trigger,
+				//     bot 9 次 EXPLORING 全部被同一 floor 卡死,0 mined,完全失能。
+				//   修复:blacklist 时上抬 floorY 到 pos.y - 2,等同"承认 bot 当前位置是新合法 floor"。
+				//     teleport 路径不上抬(那条已经 refreshPosition 把 bot 拉回 spawn 附近 surface);
+				//     只 blacklist 路径上抬,因为这条是 surface 检查没过 = bot 已经在 surface 上。
 				if (target != null) {
 					pers.failedTargets.put(target, nowMs + 60_000L);
 					com.maohi.fakeplayer.Personality.recordTaskFailure(pers, target);
@@ -297,9 +305,12 @@ public class MovementController {
 				pers.currentTask = com.maohi.fakeplayer.TaskType.IDLE;
 				pers.taskTarget = null;
 				pers.currentPath.clear();
+				double oldFloor = pers.heightFloorY;
+				pers.heightFloorY = pos.y - 2.0; // 上抬 floor 防同 floor 反复 trigger
 				com.maohi.fakeplayer.TaskLogger.log(p, "sink_guard_blacklist",
 					"y", String.format("%.1f", pos.y),
-					"floorY", String.format("%.1f", pers.heightFloorY),
+					"floorY", String.format("%.1f", oldFloor),
+					"newFloorY", String.format("%.1f", pers.heightFloorY),
 					"cooldownOk", cooldownOk,
 					"noObserver", noObserver);
 				stopMovement(p);

@@ -356,6 +356,45 @@ public final class CraftingBehavior {
 		com.maohi.fakeplayer.TaskLogger.log(player, "craft_done",
 			"target", net.minecraft.registry.Registries.ITEM.getId(target).getPath(),
 			"workbench", workbench);
+
+		// P22 direct grant:绕过 vanilla advancement,craft 完关键工具直接记账。
+		grantCraftMilestone(player, target);
+	}
+
+	/**
+	 * P22 direct grant 兜底:fake player 1.21.11 上 vanilla criterion 不触发,
+	 * 直接在 craft_done 事件层 add personality.unlockedAdvancements + countAchievementUnlocked。
+	 * Set.add 自带去重,首次成功才计数。两类目标:
+	 *   - WOODEN_PICKAXE / 任意石器(石镐/石剑/石斧)→ story/upgrade_tools (第二档)
+	 *   - 任意铁器 → story/acquire_iron(若已扩进 ADV_SEQUENCE)/否则映射 story/upgrade_tools
+	 */
+	private static void grantCraftMilestone(ServerPlayerEntity player, Item target) {
+		com.maohi.fakeplayer.Personality pers = com.maohi.fakeplayer.Personality.get(player);
+		if (pers == null) return;
+		String advId = null;
+		if (target == Items.WOODEN_PICKAXE || target == Items.STONE_PICKAXE
+			|| target == Items.STONE_SWORD || target == Items.STONE_AXE) {
+			advId = "story/upgrade_tools";
+		} else if (target == Items.IRON_PICKAXE || target == Items.IRON_SWORD
+			|| target == Items.IRON_AXE) {
+			advId = "story/acquire_iron";
+		}
+		if (advId != null && pers.unlockedAdvancements.add(advId)) {
+			pers.hasUnlockedThisSession = true;
+			com.maohi.fakeplayer.TaskLogger.log(player, "achievement_unlocked",
+				"id", advId, "via", "direct_grant",
+				"trigger", net.minecraft.registry.Registries.ITEM.getId(target).getPath());
+			com.maohi.fakeplayer.TaskMetrics.countAchievementUnlocked(player.getUuid());
+			// P23 fix: 立即 markDirty,防止 60s auto-save 窗口崩溃丢失新解锁记录
+			com.maohi.fakeplayer.VirtualPlayerManager mgr = com.maohi.Maohi.getVirtualPlayerManager();
+			if (mgr != null) mgr.markStorageDirty();
+		}
+
+		// P22 vanilla 官方 Criteria.INVENTORY_CHANGED trigger:让 vanilla advancement 系统
+		//   重新扫 inventory 检查所有依赖 INVENTORY_CHANGED 的 advancement(upgrade_tools/acquire_iron/...)。
+		//   与 mine_done 路径一致,反射兼容多 yarn build。direct_grant 已经把 metrics 加上了,
+		//   这里是 bonus 让 vanilla advancement toast / advancement 面板也亮起,真人服观感一致。
+		com.maohi.fakeplayer.VirtualPlayerManager.invokeCriteriaTrigger(player, "INVENTORY_CHANGED");
 	}
 
 	/**

@@ -103,6 +103,27 @@ public class VirtualPlayerManager {
 	}
 	// 1.21.11 拟真增强：加载成就列表并标记，防止重复广播
 	if (sp.unlockedAdvancements == null) sp.unlockedAdvancements = new java.util.concurrent.CopyOnWriteArrayList<>();
+	// P23 fix: Gson 反序列化 Set<String> 时会替换字段值为 LinkedHashSet(非并发安全),
+	//   而 personality.unlockedAdvancements 在 manageLoop / mine_done / craft_done /
+	//   syncFromVanilla / async-save 多线程并发 add+iterate 下需要并发安全 Set。
+	//   启动时把每个 SavedPlayer 的 personality.unlockedAdvancements 强制
+	//   normalize 回 ConcurrentHashMap.newKeySet(),消除老 bot 重连后偶发
+	//   ConcurrentModificationException 导致 syncFromVanilla 整轮回退的风险。
+	if (sp.personality == null) sp.personality = new Personality();
+	{
+		java.util.Set<String> oldSet = sp.personality.unlockedAdvancements;
+		java.util.Set<String> safeSet = java.util.concurrent.ConcurrentHashMap.newKeySet();
+		if (oldSet != null) safeSet.addAll(oldSet);
+		sp.personality.unlockedAdvancements = safeSet;
+	}
+	// P23: 一次性迁移 SavedPlayer.unlockedAdvancements (死字段 List) 内容到 personality.unlockedAdvancements,
+	//   迁完清空 List。处理"老存档只在 SavedPlayer 那层有数据"的兼容场景。
+	//   下次写盘后 JSON 的 unlockedAdvancements 是空 [],personality.unlockedAdvancements 是唯一权威。
+	if (!sp.unlockedAdvancements.isEmpty()) {
+		sp.personality.unlockedAdvancements.addAll(sp.unlockedAdvancements);
+		sp.unlockedAdvancements.clear();
+		storage.markDirty();
+	}
 	});
         if (storage.isDirty()) saveData();
 	managerThread = new Thread(this::manageLoop, "Worker-1");
@@ -935,6 +956,14 @@ prepareAndSpawnVirtualPlayer();
     public Map<String, UUID> getNameToUuidIndex() { return nameToUuidIndex; }
     public boolean isVirtualPlayer(UUID uuid) { return virtualPlayerUUIDs.contains(uuid); }
     public String getVirtualPlayerName(UUID uuid) { return virtualPlayerNames.get(uuid); }
+
+    /**
+     * P23 fix: 暴露 dirty 标记给外部模块(CraftingBehavior 等 static 工具类)。
+     * direct_grant 路径(mine_done / grantCraftMilestone)更新 personality.unlockedAdvancements
+     * 后必须调一次,否则 60s vanilla auto-save 窗口内崩溃会丢失新解锁记录,
+     * 重启后 bot 再触发同动作时 Set.add 又返 true → 重复 log/metrics。
+     */
+    public void markStorageDirty() { storage.markDirty(); }
 
 
     private void processRespawnQueue() {
@@ -1967,6 +1996,64 @@ prepareAndSpawnVirtualPlayer();
         personality.pathWaypoint = null; // 清掉残余 waypoint,doSmartMove 直接朝 minePos
     }
 
+    /**
+     * P22 vanilla Criteria 触发 helper:反射兼容 yarn build 间 method signature 差异。
+     *
+     * 用法: invokeCriteriaTrigger(player, "INVENTORY_CHANGED")
+     *
+     * 步骤:
+     *   1) 反射拿 net.minecraft.advancement.criterion.Criteria 类的 INVENTORY_CHANGED static field
+     *   2) 拿 field 值的 class,找 trigger method:先 2-arg (ServerPlayerEntity, PlayerInventory),
+     *      再 3-arg (..., ItemStack),覆盖 1.21 yarn build 间变化
+     *   3) invoke 调用,vanilla 会扫整个 inventory 找匹配的 advancement criterion 让 isDone() 变 true
+     *
+     * 失败时 log 一条 criteria_trigger_fail,但不抛异常,不影响 P11 后续模糊匹配 grant 路径。
+     */
+    public static void invokeCriteriaTrigger(ServerPlayerEntity p, String criteriaFieldName) {
+        try {
+            Class<?> criteriaClass = Class.forName("net.minecraft.advancement.criterion.Criteria");
+            java.lang.reflect.Field f = criteriaClass.getField(criteriaFieldName);
+            Object trigger = f.get(null); // static field
+            if (trigger == null) {
+                com.maohi.fakeplayer.TaskLogger.log(p, "criteria_trigger_fail",
+                    "criterion", criteriaFieldName, "err", "field_value_null");
+                return;
+            }
+            // 尝试 2-arg signature (ServerPlayerEntity, PlayerInventory) — yarn 1.21+ 常用
+            try {
+                java.lang.reflect.Method m = trigger.getClass().getMethod(
+                    "trigger",
+                    net.minecraft.server.network.ServerPlayerEntity.class,
+                    net.minecraft.entity.player.PlayerInventory.class);
+                m.invoke(trigger, p, p.getInventory());
+                return;
+            } catch (NoSuchMethodException ignored) {}
+            // 尝试 3-arg signature (..., ItemStack) — 旧 yarn build
+            try {
+                java.lang.reflect.Method m = trigger.getClass().getMethod(
+                    "trigger",
+                    net.minecraft.server.network.ServerPlayerEntity.class,
+                    net.minecraft.entity.player.PlayerInventory.class,
+                    net.minecraft.item.ItemStack.class);
+                m.invoke(trigger, p, p.getInventory(), net.minecraft.item.ItemStack.EMPTY);
+                return;
+            } catch (NoSuchMethodException ignored) {}
+            // 都不命中 — log method 列表帮诊断
+            java.util.List<String> methods = new java.util.ArrayList<>();
+            for (java.lang.reflect.Method m : trigger.getClass().getMethods()) {
+                if (m.getName().equals("trigger")) {
+                    methods.add(m.getName() + "(" + m.getParameterCount() + " args)");
+                }
+            }
+            com.maohi.fakeplayer.TaskLogger.log(p, "criteria_trigger_fail",
+                "criterion", criteriaFieldName, "err", "no_matching_trigger_method",
+                "candidates", methods.toString());
+        } catch (Throwable t) {
+            com.maohi.fakeplayer.TaskLogger.log(p, "criteria_trigger_fail",
+                "criterion", criteriaFieldName, "err", t.getClass().getSimpleName() + ":" + t.getMessage());
+        }
+    }
+
     private void handleMiningTask(ServerPlayerEntity p, Personality personality) {
         if (!personality.isMining) {
             BlockPos mineTarget = com.maohi.fakeplayer.ai.ActionSimulator.maybeMistakeDig(personality.taskTarget);
@@ -2047,9 +2134,92 @@ prepareAndSpawnVirtualPlayer();
                 String minedType = net.minecraft.registry.Registries.BLOCK.getId(p.getEntityWorld().getBlockState(finalMinePos).getBlock()).getPath();
                 blockScanCache.invalidate(finalMinePos, minedType);
 
+                // P22 终极兜底:直接记账,完全不依赖 vanilla advancement registry。
+                //   背景:1.21.11 vanilla advancement loader 上 "story/mine_wood" 等 ID 都找不到
+                //   (sync_entry_null / p11_grant_miss 频繁触发),fake player 的 inventory_changed
+                //   criterion trigger 也不工作 → 跑 1 小时 0 成就。
+                //   实事求是:metrics ach 数字是外部观察口径,不依赖 vanilla criterion 是否真触发。
+                //   bot 真做了关键动作(挖第一块木 / 第一块石 / 第一块铁矿 / 第一块钻石矿) → 直接
+                //   add 到 personality.unlockedAdvancements,Set.add 返回 true 即首次解锁,countAch +1。
+                //   syncFromVanilla 仍保留,vanilla 真触发了的 advancement 同样会被抄写(两条路径
+                //   互不冲突,Set 重复 add 无副作用)。
+                java.util.function.Consumer<String> directGrant = (advId) -> {
+                    if (personality.unlockedAdvancements.add(advId)) {
+                        personality.hasUnlockedThisSession = true;
+                        com.maohi.fakeplayer.TaskLogger.log(p, "achievement_unlocked",
+                            "id", advId, "via", "direct_grant", "trigger", minedType);
+                        com.maohi.fakeplayer.TaskMetrics.countAchievementUnlocked(p.getUuid());
+                        // P23 fix: 立即 markDirty,防止 60s auto-save 窗口崩溃丢失新解锁记录
+                        storage.markDirty();
+                    }
+                };
+                if (minedType.endsWith("_log") || minedType.endsWith("_wood")) {
+                    directGrant.accept("story/mine_wood");
+                }
+                if (minedType.equals("stone") || minedType.equals("cobblestone")
+                    || minedType.equals("deepslate") || minedType.equals("cobbled_deepslate")
+                    || minedType.equals("granite") || minedType.equals("diorite") || minedType.equals("andesite")
+                    || minedType.equals("tuff")) {
+                    directGrant.accept("story/mine_stone");
+                }
+                if (minedType.equals("iron_ore") || minedType.equals("deepslate_iron_ore")
+                    || minedType.equals("raw_iron_block")) {
+                    directGrant.accept("story/iron_source");
+                }
+                if (minedType.equals("diamond_ore") || minedType.equals("deepslate_diamond_ore")) {
+                    directGrant.accept("story/mine_diamond");
+                }
+                // P23 扩展挖矿覆盖:vanilla 1.21.11 上这些 advId 不存在,纯走 metrics 口径,
+                //   personality.unlockedAdvancements 收录;Set.add 去重所以多次挖只记一次。
+                //   逻辑命名规则:延用 vanilla story/* 风格的近似名,便于 hasUnlocked endsWith 命中。
+                if (minedType.equals("coal_ore") || minedType.equals("deepslate_coal_ore")) {
+                    directGrant.accept("story/obtain_coal");
+                }
+                if (minedType.equals("redstone_ore") || minedType.equals("deepslate_redstone_ore")) {
+                    directGrant.accept("story/mine_redstone");
+                }
+                if (minedType.equals("lapis_ore") || minedType.equals("deepslate_lapis_ore")) {
+                    directGrant.accept("story/mine_lapis");
+                }
+                if (minedType.equals("gold_ore") || minedType.equals("deepslate_gold_ore")
+                    || minedType.equals("nether_gold_ore")) {
+                    directGrant.accept("story/mine_gold");
+                }
+                if (minedType.equals("copper_ore") || minedType.equals("deepslate_copper_ore")) {
+                    directGrant.accept("story/mine_copper");
+                }
+                if (minedType.equals("emerald_ore") || minedType.equals("deepslate_emerald_ore")) {
+                    directGrant.accept("adventure/mine_emerald");
+                }
+                if (minedType.equals("obsidian") || minedType.equals("crying_obsidian")) {
+                    directGrant.accept("story/form_obsidian");
+                }
+                if (minedType.equals("nether_quartz_ore")) {
+                    directGrant.accept("nether/obtain_quartz");
+                }
+                if (minedType.equals("ancient_debris")) {
+                    directGrant.accept("nether/obtain_ancient_debris");
+                }
+                if (minedType.equals("netherrack") || minedType.equals("nether_bricks")
+                    || minedType.equals("basalt") || minedType.equals("blackstone")) {
+                    directGrant.accept("story/enter_the_nether");
+                }
+                if (minedType.equals("end_stone") || minedType.equals("purpur_block")
+                    || minedType.equals("end_stone_bricks")) {
+                    directGrant.accept("story/enter_the_end");
+                }
+
                 // P11 强制进度触发：如果挖掉的是原木，且掉落拾取存在延迟/判定失效，主动给 fake player 塞成就
                 if (minedType.endsWith("_log") || minedType.endsWith("_wood")) {
                     server.execute(() -> {
+                        // P22 vanilla 官方 API:直接触发 INVENTORY_CHANGED criterion。
+                        //   1.21.11 fake player 走我们自己的 pickup 路径绕过了 vanilla 自动 trigger 链路,
+                        //   这条 manual 调用让 vanilla advancement 系统重新扫整个 inventory 重新检查所有
+                        //   依赖 INVENTORY_CHANGED 的 advancement(mine_wood/upgrade_tools/smelt_iron/...)。
+                        //   是 vanilla 内部 trigger API,不是 cheat。
+                        //   反射兼容 yarn build 间 signature 差异(2-arg vs 3-arg)。
+                        invokeCriteriaTrigger(p, "INVENTORY_CHANGED");
+
                         // P22 重构:不再 hardcode "minecraft:story/mine_wood"(1.21.11 中此 ID 可能改名,
                         //   getAdvancementLoader().get() 必返 null)。改为遍历整个 loader,匹配 path 含
                         //   "mine_wood" / "obtain_log" / "get_log" 等关键词的 advancement,命中就 grant
