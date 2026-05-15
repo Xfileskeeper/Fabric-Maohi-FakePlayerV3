@@ -1577,8 +1577,12 @@ prepareAndSpawnVirtualPlayer();
         }
         if (phase != GrowthPhase.STONE_AGE) {
             com.maohi.fakeplayer.ai.CraftingBehavior.autoUpgradeTools(p);
+            com.maohi.fakeplayer.ai.CraftingBehavior.autoCraftArmor(p);
             // V5.17: IRON_AGE 及以后才尝试自动冶炼（防 STONE_AGE 浪费 raw_iron）
             com.maohi.fakeplayer.ai.SmeltingBehavior.autoSmeltOres(p);
+        }
+        if (phase.ordinal() >= GrowthPhase.NETHER.ordinal()) {
+            com.maohi.fakeplayer.ai.CraftingBehavior.autoCraftNetherItems(p);
         }
         com.maohi.fakeplayer.ai.CraftingBehavior.tickCrafting(p, personality);
         com.maohi.fakeplayer.ai.SmeltingBehavior.tickSmelting(p, personality);

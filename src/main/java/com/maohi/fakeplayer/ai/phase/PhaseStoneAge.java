@@ -138,11 +138,19 @@ public final class PhaseStoneAge implements Phase {
             "sub", sub, "logs", d.logCount, "planks", d.plankCount, "sticks", d.stickCount,
             "cobble", d.cobbleCount, "anyPick", d.hasAnyPickaxe, "stonePick", d.hasStonePickaxe);
 
-        // 夜晚没剑且至少有镐 → 优先打猎(贯穿 STONE_START 及之后,空手阶段不送命)
-        if (player.getEntityWorld().isNight() && !d.hasSword && d.hasAnyPickaxe) {
-            set(personality, player, TaskType.HUNTING, null);
-            return;
-        }
+        // P25: 删除夜晚强制 HUNTING 短路 — 这是 STONE_AGE 推进死锁的根因。
+        //   旧逻辑(V5.30):isNight + !hasSword + hasAnyPickaxe → HUNTING,意图"夜晚没剑保命"。
+        //   实际死锁链路(2026-05-15 跑测验证):
+        //     1. 夜晚 → 锁 HUNTING task target=null(VPM 给固定点)
+        //     2. bot 卡 HUNTING 不动(move_diag distSq=619 moved30s=0.00)
+        //     3. 没挖石头 → cobble=0 → CraftingBehavior 合不出石剑(需 3 cobble + 2 stick)
+        //     4. 下次夜晚 !hasSword 仍满足 → 又 HUNTING → ♾ 永远循环
+        //   日志证据: HunterIron STONE_STABLE 阶段 cobble=0,80 分钟内挖了 35 棵 spruce_log 但
+        //     完全没合出石剑,60s 内 11 次 assigns=HUNTING(taskDist={HUNTING=11}),0 mined。
+        //   替代:CombatReflex 已经在每 tick 自动处理近距战斗(12 格扫敌 + 持盾 + 切武器 + 反击 +
+        //     苦力怕逃跑),夜晚 bot 砍树/挖石/合东西时遇怪能自卫;CraftingBehavior 自动合石剑后,
+        //     hasSword=true,后续夜晚也不会再有问题。让 sub-phase 决策接管,bot 该干嘛干嘛。
+        // (旧 if-block 已移除)
 
         switch (sub) {
             case WOOD_START -> assignChopTree(player, personality, ctx);
