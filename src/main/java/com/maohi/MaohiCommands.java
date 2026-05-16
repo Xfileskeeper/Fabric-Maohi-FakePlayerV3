@@ -272,14 +272,13 @@ public class MaohiCommands {
             sb.append("§7用 §f/maohi list <name> §7查看单假人详细成就列表");
             feedback(ctx.getSource(), sb.toString());
         } else {
-            // 面板/RCON 专用路径：添加强制的醒目分隔符，应对面板不换行 + \n 乱码的缺陷
-            StringBuilder sb = new StringBuilder();
-            sb.append("§6[FS Core] 在线假人 §f").append(uuids.size()).append(" §6名: ");
+            // 控制台/RCON/面板路径：每个 bot 独立 feedback（标准终端自动分行）。
+            // 每行加 ▶ 前缀，即使面板把多行挤成一行也能靠 ▶ 区分各假人。
+            feedback(ctx.getSource(), "§6[FS Core] 在线假人 §f" + uuids.size() + " §6名:");
             for (UUID uuid : new java.util.ArrayList<>(uuids)) {
-                sb.append("  ▶ ").append(formatBotLine(manager, uuid).trim()).append(" ");
+                feedback(ctx.getSource(), "▶" + formatBotLine(manager, uuid));
             }
-            sb.append("  ▶ §7用 §f/maohi list <name> §7查看详细");
-            feedback(ctx.getSource(), sb.toString());
+            feedback(ctx.getSource(), "▶ §7用 §f/maohi list <name> §7查看单假人详细成就列表");
         }
         return uuids.size();
     }
