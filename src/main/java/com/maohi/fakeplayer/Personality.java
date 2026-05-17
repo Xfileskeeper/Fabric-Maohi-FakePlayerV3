@@ -315,6 +315,9 @@ public class Personality {
 	public long tablePlaceRetryCooldownUntil = 0L;
 	// planA P-1 诊断:tryPlaceCraftingTable 节流日志锚点(避免每 tick 刷屏)。
 	public transient long lastTablePlaceDiagAt = 0L;
+	// V5.45 OPT: no_inv_table 是木器时代常态,单独延长节流到 5min(6000 tick),
+	//   其他 reason(task_state / gui_blocked 等)仍用 30s 节流保留诊断价值。
+	public transient long lastTableNoInvDiagAt = 0L;
 	// planA P-1 诊断:doSmartMove 节流日志锚点 + 上次取样位置(检测 bot 是否真的在动)。
 	public transient long lastMovementDiagAt = 0L;
 	public transient double lastMovementSampleX = Double.NaN;
