@@ -546,17 +546,17 @@ public class PlayerSpawner {
             //   vanilla 1.21.x 的 PlayerEntity.Dimension 字段是 "minecraft:overworld" /
             //   "minecraft:the_nether" / "minecraft:the_end" 字符串。缺字段(老存档)按 overworld 处理。
             if (nbt.contains("Dimension")) {
-                String dim = nbt.getString("Dimension");
+                String dim = nbt.getString("Dimension").orElse("");
                 if (dim != null && !dim.isEmpty() && !"minecraft:overworld".equals(dim)) {
                     return null;
                 }
             }
 
             if (!nbt.contains("Pos")) return null;
-            net.minecraft.nbt.NbtList posList = nbt.getList("Pos", 6); // 6=Double
-            double bx = posList.getDouble(0);
-            double by = posList.getDouble(1);
-            double bz = posList.getDouble(2);
+            net.minecraft.nbt.NbtList posList = nbt.getList("Pos"); // yarn 1.21.11: getList(key) 不再接受 type 参数
+            double bx = posList.getDouble(0).orElse(0.0);
+            double by = posList.getDouble(1).orElse(0.0);
+            double bz = posList.getDouble(2).orElse(0.0);
             int cx = ((int) bx) >> 4;
             int cz = ((int) bz) >> 4;
             if (world.isChunkLoaded(cx, cz)) return null; // 已加载，无需干预
@@ -573,12 +573,13 @@ public class PlayerSpawner {
                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
 
             // 临时重写 Pos 字段为 worldSpawn 坐标，避开 loadPlayerData 的同步加载
-            net.minecraft.util.math.BlockPos spawnPos = world.getSpawnPos();
-            nbt.put("Pos", net.minecraft.nbt.NbtList.of(
-                net.minecraft.nbt.NbtDouble.of(spawnPos.getX() + 0.5),
-                net.minecraft.nbt.NbtDouble.of(spawnPos.getY()),
-                net.minecraft.nbt.NbtDouble.of(spawnPos.getZ() + 0.5)
-            ));
+            // yarn 1.21.11: ServerWorld 无 getSpawnPos()，复用已有的 readWorldSpawnPos 反射兼容路径
+            net.minecraft.util.math.BlockPos spawnPos = readWorldSpawnPos(world);
+            net.minecraft.nbt.NbtList newPosList = new net.minecraft.nbt.NbtList();
+            newPosList.add(net.minecraft.nbt.NbtDouble.of(spawnPos.getX() + 0.5));
+            newPosList.add(net.minecraft.nbt.NbtDouble.of(spawnPos.getY()));
+            newPosList.add(net.minecraft.nbt.NbtDouble.of(spawnPos.getZ() + 0.5));
+            nbt.put("Pos", newPosList);
             // V5.57 (3) 清理 Motion / Fall / Riding,防止 bot spawn 在 worldSpawn 带原下线惯性/骑乘。
             //   Motion 缺省 vanilla 当 (0,0,0) 处理;FallDistance 缺省当 0;RootVehicle 缺省当无骑乘。
             nbt.remove("Motion");
