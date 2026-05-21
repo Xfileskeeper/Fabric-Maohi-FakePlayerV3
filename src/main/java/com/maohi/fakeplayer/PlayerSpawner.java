@@ -553,7 +553,8 @@ public class PlayerSpawner {
             }
 
             if (!nbt.contains("Pos")) return null;
-            net.minecraft.nbt.NbtList posList = nbt.getList("Pos"); // yarn 1.21.11: getList(key) 不再接受 type 参数
+            net.minecraft.nbt.NbtList posList = nbt.getList("Pos").orElse(null); // yarn 1.21.11: getList 返回 Optional
+            if (posList == null || posList.size() < 3) return null;
             double bx = posList.getDouble(0).orElse(0.0);
             double by = posList.getDouble(1).orElse(0.0);
             double bz = posList.getDouble(2).orElse(0.0);
