@@ -1318,7 +1318,7 @@ prepareAndSpawnVirtualPlayer();
             // V5.50 E 修复: 因为 FakeClientConnection 没有被 ServerNetworkIo 管理, tickConnections() 不会执行, 
             // 所以必须手动调用原版 networkHandler 的 onDisconnected 方法, 否则原生 PlayerManager 中的假人将变成僵尸玩家。
             if (p != null && p.networkHandler != null) {
-                p.networkHandler.onDisconnected(net.minecraft.text.Text.translatable("multiplayer.disconnect.generic"));
+                p.networkHandler.onDisconnected(new net.minecraft.network.DisconnectionInfo(net.minecraft.text.Text.translatable("multiplayer.disconnect.generic")));
             }
             // 项目内部状态深度清理(独立于 vanilla PlayerManager,杜绝内存泄漏)
             virtualPlayerUUIDs.remove(uuid);
