@@ -179,12 +179,38 @@ public class MovementController {
 		//   /洞口 → 自由落体进 cave → 卡 y=30~44 不出来。日志证据见 commit 1daf53f 之后多场跑测。
 		//   未加载 chunk 不强加载(getChunk force=false):服务器 lag 时不抢占主线程,等下一 tick
 		//   vanilla 自然加载。bot 此 tick stopMovement 不动,损失 ≤ 50ms,远胜于自由落体。
+		// V5.58 (option B+D): 远征 bot 在 spawn 外 1000+ 格时 vanilla 不主动 promote chunk,
+		//   bot 干等永远不解锁 → 4 小时 0 mined 死循环。这里加双重处理:
+		//     D: 主动 setChunkForced 周围 3x3(5s 节流),trigger vanilla 异步 promote
+		//     B: chunk 持续未加载 >15s → blacklist target + IDLE,让 reassign 选别的方向
 		if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkFullyLoaded(world, p.getBlockPos())) {
 			if (pers != null) {
 				logMoveLatchOnce(p, pers, "chunk_not_loaded", "chunkX", p.getBlockX() >> 4, "chunkZ", p.getBlockZ() >> 4);
+				// D: 主动 force load 周围 3x3(5s 节流)
+				maohiBotForceLoadRing(p, pers, world);
+				// B: wall-clock 超过 15s 仍 chunk_not_loaded → 切 IDLE
+				long nowMs = System.currentTimeMillis();
+				if (pers.chunkNotLoadedSince == 0L) pers.chunkNotLoadedSince = nowMs;
+				else if (nowMs - pers.chunkNotLoadedSince > 15_000L && target != null) {
+					com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+						"reason", "chunk_not_loaded_timeout",
+						"target", target,
+						"waitMs", nowMs - pers.chunkNotLoadedSince);
+					pers.failedTargets.put(target, nowMs + 60_000L);
+					com.maohi.fakeplayer.Personality.recordTaskFailure(pers, target);
+					pers.currentTask = com.maohi.fakeplayer.TaskType.IDLE;
+					pers.taskTarget = null;
+					pers.currentPath.clear();
+					pers.chunkNotLoadedSince = 0L; // 重置,下次远征重新计时
+				}
 			}
 			stopMovement(p);
 			return false;
+		}
+		// chunk 正常加载 → 清 streak 时间戳,bot 持续移动时维护 botForcedChunks ring
+		if (pers != null) {
+			if (pers.chunkNotLoadedSince != 0L) pers.chunkNotLoadedSince = 0L;
+			maohiBotForceLoadRing(p, pers, world);
 		}
 
 		// 到达目标
@@ -920,5 +946,62 @@ public class MovementController {
 		kv[0] = "reason"; kv[1] = reason;
 		System.arraycopy(extra, 0, kv, 2, extra.length);
 		com.maohi.fakeplayer.TaskLogger.log(p, "move_latch", kv);
+	}
+
+	/**
+	 * V5.58 (option D): bot 主动 setChunkForced 周围 3x3,trigger vanilla 异步 chunk gen。
+	 *
+	 * 背景:
+	 *   假人 viewDistance=4 在 spawn 外 1000+ 格远征时,vanilla chunk pipeline 不会
+	 *   主动给这些位置 promote chunk → bot 走到 chunk 边界就触发 chunk_not_loaded →
+	 *   stopMovement → 死循环 4 小时 0 mined。
+	 *
+	 * 方案:
+	 *   bot 当前位置周围 3x3=9 chunks 全部 setChunkForced(true),与 vanilla /forceload add
+	 *   一致(FORCED ticket,异步 promote 到 ENTITY_TICKING)。setChunkForced 自身 <1ms,
+	 *   主线程上零阻塞。
+	 *
+	 * 生命周期:
+	 *   - 5s 节流(lastBotForcedRingAt):不每 tick 跑 9 次 setChunkForced
+	 *   - bot 移动 → 新 ring 覆盖,旧 ring 中**离 bot > 3 chunks** 的 chunks 主动释放
+	 *   - bot 下线 → VPM.dispatchLogout 调 releaseBotForcedChunks 释放全部(防 leak)
+	 *
+	 * 必须主线程调用:setChunkForced 修改 ServerWorld.ForcedChunkState,非线程安全。
+	 *   doSmartMove 已在 server.execute lambda 内跑(V5.55 P1b 改造后),满足条件。
+	 */
+	private static void maohiBotForceLoadRing(ServerPlayerEntity p,
+			com.maohi.fakeplayer.Personality pers, ServerWorld world) {
+		long nowMs = System.currentTimeMillis();
+		if (nowMs - pers.lastBotForcedRingAt < 5_000L) return;
+		pers.lastBotForcedRingAt = nowMs;
+
+		int botCx = p.getBlockX() >> 4;
+		int botCz = p.getBlockZ() >> 4;
+
+		// 1. force load 当前 3x3 ring(9 chunks)
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				int cx = botCx + dx;
+				int cz = botCz + dz;
+				long packed = ((long) cx << 32) | (cz & 0xFFFFFFFFL);
+				if (pers.botForcedChunks.add(packed)) {
+					try { world.setChunkForced(cx, cz, true); } catch (Throwable ignored) {}
+				}
+			}
+		}
+
+		// 2. 释放离 bot > 3 chunks 的旧 forced chunks(bot 已走远,不再需要)
+		java.util.Iterator<Long> it = pers.botForcedChunks.iterator();
+		while (it.hasNext()) {
+			long packed = it.next();
+			int cx = (int) (packed >> 32);
+			int cz = (int) (packed & 0xFFFFFFFFL);
+			int distX = Math.abs(cx - botCx);
+			int distZ = Math.abs(cz - botCz);
+			if (Math.max(distX, distZ) > 3) {
+				try { world.setChunkForced(cx, cz, false); } catch (Throwable ignored) {}
+				it.remove();
+			}
+		}
 	}
 }

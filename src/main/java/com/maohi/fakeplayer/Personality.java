@@ -331,6 +331,19 @@ public class Personality {
 	public transient long lastMovementDiagAt = 0L;
 	// V5.55 P1b 诊断:30s/bot/reason 节流的 latch 原因 log,定位 moved30s=0 的真凶
 	public transient long lastMoveLatchLogAt = 0L;
+	// V5.58 (option B): chunk_not_loaded 起始时间戳。chunk 持续未加载 >15s → blacklist target + IDLE,
+	//   让 manageLoop reassign 选别的方向,避免干等 vanilla 永远不 promote 的死锁。
+	//   wall-clock 不依赖 tick 频率(中卡时 AI tick 间隔会拉长,tick 计数失准)。
+	public transient long chunkNotLoadedSince = 0L;
+	// V5.58 (option D): 节流 maohiBotForceLoadRing,5 秒最多 force 一次 3x3 ring,
+	//   避免每 tick 都派 9 个 setChunkForced 到主线程加重 mspt。
+	public transient long lastBotForcedRingAt = 0L;
+	// V5.58 (option D): 本 bot 主动 setChunkForced(true) 的 chunks (long: high32=cx, low32=cz)。
+	//   bot 走到边界 chunk_not_loaded 时主动 force load 周围 3x3,避免 vanilla 不 promote 死锁。
+	//   生命周期:bot 移动到新位置 → 替换 ring(超额释放最远的);bot 下线 → 全部释放(VPM
+	//   dispatchLogout 兜底)。无 thread-safe 要求 — 只在主线程 doSmartMove lambda 内读写。
+	//   transient = 不持久化,重启自然重置,设计上接受少量 chunk leak(重启后 vanilla 自然 unload)。
+	public transient java.util.Set<Long> botForcedChunks = new java.util.HashSet<>();
 	// V5.56 Phase 3: 冷区块热点登录后需要延迟传送回下线位置。
 	//   volatile:AI 线程读 + 主线程 lambda 写 null,无锁可见性保证。
 	public transient volatile BlockPos pendingTeleportPos = null;

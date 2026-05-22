@@ -78,6 +78,22 @@ public class VirtualPlayerManager {
     // V5.56: 上次 onPlayerConnect 完成时间戳，配合 SPAWN_COOLDOWN_MS 保证两次 spawn 之间有喘息窗口
     private volatile long lastSpawnCompletedAt = 0L;
     private static final long SPAWN_COOLDOWN_MS = 10_000L;
+    // V5.58: 上次 onDisconnected 派遣时间戳。同 tick 多只假人 logout 会让 vanilla
+    //   onDisconnected(saveSync + chunk unload + broadcast)在主线程上累积,触发
+    //   "Can't keep up 2-3 秒级" burst。1s 节流让每秒最多一只走 onDisconnected,
+    //   超额的延后到下次 manageLoop 检查时再处理(本节流不丢任何 logout,只错峰)。
+    private volatile long lastLogoutDispatchedAt = 0L;
+    private static final long LOGOUT_COOLDOWN_MS = 1_000L;
+    private final java.util.concurrent.ConcurrentLinkedQueue<UUID> pendingLogoutQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    // V5.58 (option E): 长期 0 进度 bot 兜底 kick 机制。
+    //   场景:bot 上线 >1h 但 ach==0 && mined==0 → 多半被某种状态卡死
+    //   (chunk_not_loaded 长期等待、setTask 失败循环、世界数据异常等),
+    //   tick 内的自救逻辑都救不回来,只能 kick 让下轮 spawn 一只新的。
+    //   90s 一次扫描:30s 太密会增加主线程稳态压力,90s 既保留时效又留出喘息(用户反馈)。
+    //   单 scan 最多 kick 1 只,避免与 LOGOUT_COOLDOWN_MS(1s)叠加成 onDisconnected burst。
+    private long lastIdleProgressScanAt = 0L;
+    private static final long IDLE_PROGRESS_SCAN_INTERVAL_MS = 300_000L;
+    private static final long IDLE_PROGRESS_THRESHOLD_MS = 3_600_000L; // 1h
     private volatile boolean running = false;
     private Thread managerThread;
 
@@ -469,7 +485,12 @@ public class VirtualPlayerManager {
 			final UUID teleportUuid = uuid;
 			server.execute(() -> {
 				if (!p.isAlive()) return;
+				// V5.58 诊断:refreshPositionAndAngles 触发 vanilla chunk re-tracking + entity tracker re-init,
+				//   怀疑这条是 spawn 后 30s-1m burst 的真凶。打点 mspt + 耗时确认。
+				long tpStart = System.nanoTime();
+				float msptBefore = server.getAverageTickTime();
 				p.refreshPositionAndAngles(tp.getX() + 0.5, tp.getY(), tp.getZ() + 0.5, p.getYaw(), p.getPitch());
+				long tpCostMs = (System.nanoTime() - tpStart) / 1_000_000L;
 				personality.pendingTeleportPos = null;
 				personality.pendingTeleportAt = 0L;
 				personality.heightFloorY = tp.getY() - 10.0; // 重锚 floor
@@ -479,7 +500,10 @@ public class VirtualPlayerManager {
 				//   会被当前真实位置覆盖,但删 .bak 让启动还原路径不再误把过期备份覆盖回来。
 				com.maohi.fakeplayer.PlayerSpawner.deletePlayerDataBackup(server, teleportUuid);
 				com.maohi.fakeplayer.TaskLogger.log(p, "cold_chunk_teleport",
-					"to", "(" + tp.getX() + "," + tp.getY() + "," + tp.getZ() + ")");
+					"to", "(" + tp.getX() + "," + tp.getY() + "," + tp.getZ() + ")",
+					"costMs", tpCostMs,
+					"msptBefore", String.format("%.1f", msptBefore),
+					"msptAfter", String.format("%.1f", server.getAverageTickTime()));
 			});
 		}
 		continue; // 目标 chunk 未就绪时 bot 在 worldSpawn 不动
@@ -659,6 +683,10 @@ prepareAndSpawnVirtualPlayer();
 
                         // V5.56: 调度错峰登录队列，受 10s cooldown + MSPT 双重门控
                         processPendingSpawns();
+                        // V5.58: 调度错峰下线队列(1s cooldown),避免同 tick 多只 onDisconnected 累积 mspt
+                        processPendingLogouts();
+                        // V5.58 (option E): 长期 0 进度 bot 兜底 kick(300s 节流 + 1h 阈值)
+                        scanIdleNoProgressBots();
 
                         // 检查是否有计划下线的假人 (社交联动)
                         logoutScheduledTime.entrySet().removeIf(entry -> {
@@ -1119,6 +1147,26 @@ prepareAndSpawnVirtualPlayer();
         forcedSpawnChunks.add(packedChunk);
     }
 
+    /** V5.58 (option D): bot 下线前释放该 bot 主动 force load 的 chunks(ring + 任何残留)。
+     *  必须主线程调用(setChunkForced 非线程安全)。dispatchLogout 已保证此条件。
+     *  bot 已不存在 / personality 已清理 / chunks 集合为空时静默 no-op。 */
+    public void releaseBotForcedChunks(UUID uuid) {
+        Personality pers = playerPersonalities.get(uuid);
+        if (pers == null || pers.botForcedChunks == null || pers.botForcedChunks.isEmpty()) return;
+        net.minecraft.server.world.ServerWorld overworld = server.getOverworld();
+        if (overworld == null) { pers.botForcedChunks.clear(); return; }
+        int released = pers.botForcedChunks.size();
+        for (Long packed : pers.botForcedChunks) {
+            int cx = (int) (packed >> 32);
+            int cz = packed.intValue();
+            try { overworld.setChunkForced(cx, cz, false); } catch (Throwable ignored) {}
+        }
+        pers.botForcedChunks.clear();
+        com.maohi.fakeplayer.TaskLogger.logRaw(
+            virtualPlayerNames.getOrDefault(uuid, uuid.toString()),
+            "bot_forced_chunks_release", "count", released);
+    }
+
     /** V5.57: 启动期还原所有 &lt;uuid&gt;.dat.bak → &lt;uuid&gt;.dat,保证 tryDetectColdChunk 改写过程
      *   被异常中断(进程崩溃 / chunk 永远不加载)时,真实下线位置不丢失。还原后删除 .bak。
      *   静默失败:还原失败的 .bak 保留在磁盘供人工排查,不阻塞启动。 */
@@ -1298,6 +1346,34 @@ prepareAndSpawnVirtualPlayer();
 	}
 
     private void startLogoutProcessInternal(UUID uuid) {
+        // V5.58: logout 节流入口。直接同 tick 多只 onDisconnected 会让 vanilla
+        //   saveSync + broadcast + chunk unload 在主线程累积,触发秒级 burst。
+        //   1s 节流后超额 logout 入 pendingLogoutQueue,由 processPendingLogouts 错峰处理。
+        long now = System.currentTimeMillis();
+        if (now - lastLogoutDispatchedAt < LOGOUT_COOLDOWN_MS) {
+            pendingLogoutQueue.offer(uuid);
+            return;
+        }
+        lastLogoutDispatchedAt = now;
+        dispatchLogout(uuid);
+    }
+
+    /** V5.58: manageLoop 每轮 logicTickCounter==20 时调,从队列取一只走 onDisconnected。
+     *  cooldown 由 startLogoutProcessInternal 持续推进,本方法只负责出队 + 派发。 */
+    private void processPendingLogouts() {
+        if (pendingLogoutQueue.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        if (now - lastLogoutDispatchedAt < LOGOUT_COOLDOWN_MS) return;
+        UUID uuid = pendingLogoutQueue.poll();
+        if (uuid == null) return;
+        // 假人可能在等待期间被其它路径(stop / kickAllImmediately)清掉了,跳过
+        if (!virtualPlayerUUIDs.contains(uuid)) return;
+        lastLogoutDispatchedAt = now;
+        dispatchLogout(uuid);
+    }
+
+    /** V5.58: 从 startLogoutProcessInternal 抽出来的实际派遣逻辑,被节流和出队两处复用。 */
+    private void dispatchLogout(UUID uuid) {
         server.execute(() -> {
             ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
             // V5.50 D: 修复 handleDisconnection called twice 的根因。
@@ -1315,10 +1391,28 @@ prepareAndSpawnVirtualPlayer();
             if (conn instanceof FakeClientConnection fcc) {
                 fcc.closeChannel();
             }
-            // V5.50 E 修复: 因为 FakeClientConnection 没有被 ServerNetworkIo 管理, tickConnections() 不会执行, 
+            // V5.58 (option D): bot 下线前先释放它主动 force load 的 chunks(ring + 残留),
+            //   避免 onDisconnected 触发 chunk pipeline 时 forced chunks 还卡在 ENTITY_TICKING。
+            //   主线程上跑,与 onDisconnected 同一 lambda,顺序保证一致。
+            releaseBotForcedChunks(uuid);
+            // V5.50 E 修复: 因为 FakeClientConnection 没有被 ServerNetworkIo 管理, tickConnections() 不会执行,
             // 所以必须手动调用原版 networkHandler 的 onDisconnected 方法, 否则原生 PlayerManager 中的假人将变成僵尸玩家。
+            // V5.58 诊断:打点 mspt + 计时,确认这条是不是 "Can't keep up 2-3s burst" 的真凶。
+            long disconnectStart = System.nanoTime();
+            float msptBefore = server.getAverageTickTime();
             if (p != null && p.networkHandler != null) {
                 p.networkHandler.onDisconnected(new net.minecraft.network.DisconnectionInfo(net.minecraft.text.Text.translatable("multiplayer.disconnect.generic")));
+            }
+            long disconnectCostMs = (System.nanoTime() - disconnectStart) / 1_000_000L;
+            // 单次 onDisconnected > 100ms 必打 log;否则只在 mspt 已经飘高时打(诊断价值最大的时刻)
+            if (disconnectCostMs > 100 || msptBefore > 60.0f) {
+                com.maohi.fakeplayer.TaskLogger.logRaw(
+                    virtualPlayerNames.getOrDefault(uuid, uuid.toString()),
+                    "onDisconnected_timing",
+                    "costMs", disconnectCostMs,
+                    "msptBefore", String.format("%.1f", msptBefore),
+                    "msptAfter", String.format("%.1f", server.getAverageTickTime()),
+                    "queueDepth", pendingLogoutQueue.size());
             }
             // 项目内部状态深度清理(独立于 vanilla PlayerManager,杜绝内存泄漏)
             virtualPlayerUUIDs.remove(uuid);
@@ -1340,6 +1434,66 @@ prepareAndSpawnVirtualPlayer();
             storage.markDirty();
         });
     }
+
+    /**
+     * V5.58 (option E): 长期 0 进度 bot 兜底 kick 扫描。
+     * <p>
+     * 90s 节流一次,遍历 virtualPlayerUUIDs 寻找在线 > 1h 且 ach==0 && mined==0 的 bot,
+     * kick 一只(单 scan 最多 1 只),并同步把它从 knownPlayers / nameToUuidIndex 移除,
+     * 防止下轮 spawn 的 recruit-from-saved 路径又把同一 UUID/名字捞回来重蹈同一卡点(livelock)。
+     * <p>
+     * 线程:manageLoop worker。startLogoutProcessInternal → dispatchLogout 内部走
+     * server.execute,实际 onDisconnected 在主线程 next tick 执行,与 LOGOUT_COOLDOWN_MS(1s)
+     * 节流叠加,这里再做 "单 scan 1 只" 三重保护,杜绝同 tick 多只下线 burst。
+     * <p>
+     * 阈值取舍:
+     *  - 1h:正常 bot 上线 10~20 分钟就有第一条 ach(min/wood, story/mine_stone),
+     *    1h 还 0 进度只可能是被卡死(chunk_not_loaded 持续等待 / setTask 失败循环 /
+     *    世界异常等),tick 内自救路径已无解。
+     *  - mined==0:即便 ach 系统 mixin 异常没记上,只要在动就有挖方块计数;mined==0
+     *    意味着这只 bot 几乎没动过,佐证 1h 阈值的"卡死"判定。
+     */
+    private void scanIdleNoProgressBots() {
+        long now = System.currentTimeMillis();
+        if (now - lastIdleProgressScanAt < IDLE_PROGRESS_SCAN_INTERVAL_MS) return;
+        lastIdleProgressScanAt = now;
+
+        for (UUID uuid : virtualPlayerUUIDs) {
+            Long loginAt = loginTimes.get(uuid);
+            if (loginAt == null) continue;
+            long uptime = now - loginAt;
+            if (uptime < IDLE_PROGRESS_THRESHOLD_MS) continue;
+
+            Personality pers = playerPersonalities.get(uuid);
+            if (pers == null) continue;
+            int ach = (pers.unlockedAdvancements == null) ? 0 : pers.unlockedAdvancements.size();
+            int mined = pers.blocksMinedTotal;
+            if (ach != 0 || mined != 0) continue;
+
+            // 命中:1h+ 在线但完全 0 进度。
+            String name = virtualPlayerNames.getOrDefault(uuid, uuid.toString());
+            com.maohi.fakeplayer.TaskLogger.logRaw(
+                name,
+                "kick_idle_no_progress",
+                "uptimeMs", uptime,
+                "ach", ach,
+                "mined", mined);
+
+            // livelock 防御:先从存档索引拔掉,即使后续 kick 路径异常也保证下轮
+            //   spawn 不会再 recruit 同一只(走 fresh random 名字 + 新 UUID)。
+            knownPlayers.remove(uuid);
+            nameToUuidIndex.remove(name);
+            storage.markDirty();
+
+            // 走标准 logout 节流入口:1s LOGOUT_COOLDOWN_MS + dispatchLogout 切主线程。
+            startLogoutProcessInternal(uuid);
+
+            // 单 scan 仅 kick 1 只:90s 节流 × 1s logout 节流 × "1 只/扫"
+            //   三重保护,确保即便有 10 只命中也按 90s 节奏逐一下线。
+            return;
+        }
+    }
+
     private boolean isCelebrity(String name) {
         String[] celebrities = {"Dream", "Technoblade", "GeorgeNotFound", "Sapnap", "Quackity", "Philza", "TommyInnit", "WilburSoot", "Shubble", "Smajor"};
         for (String c : celebrities) if (name.toLowerCase().contains(c.toLowerCase())) return true;
@@ -1363,6 +1517,8 @@ prepareAndSpawnVirtualPlayer();
 		server.execute(() -> {
 			ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
 			if (p != null) {
+				// V5.58 (option D): 关服时也要释放本 bot 的 forced chunks,与 dispatchLogout 对齐
+				releaseBotForcedChunks(uuid);
 				// V5.27: vanilla onDisconnected → PlayerManager.remove → savePlayerData
 				// 自动把完整状态写入 <uuid>.dat,无需手动保存坐标
 				p.networkHandler.onDisconnected(new net.minecraft.network.DisconnectionInfo(Text.literal("Logged out")));

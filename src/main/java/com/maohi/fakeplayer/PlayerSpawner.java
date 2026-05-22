@@ -450,7 +450,13 @@ public class PlayerSpawner {
      *   - 反射重建与旧实现相同，兼容 yarn mapping 差异
      */
     private static net.minecraft.network.packet.c2s.common.SyncedClientOptions buildSyncedClientOptions(UUID uuid) {
-        final int PHYSICAL_VIEW_DISTANCE = 2; // 物理 chunk ticket 视距固定 2，节省性能
+        // V5.58 (option A): viewDistance 2 → 4。
+        //   背景:11 只假人远征到 spawn 外 1000+ 格全员 4-5 小时 0 mined,根因是 viewDistance=2
+        //   只覆盖 ±32 格,bot 走到 chunk 边界就触发 chunk_not_loaded → stopMovement → 死循环。
+        //   提到 4 后覆盖 ±64 格 (9x9=81 chunks),给 vanilla chunk pipeline 足够 buffer time。
+        //   代价:每只 bot chunk 数 25 → 81 (3.2×),但 N1 EntityTrackerEntryMixin 已抵消大部分
+        //   网络层副作用,主要负担是 chunk simulation 范围。如果跑测 mspt 飙升明显,可回退到 3。
+        final int PHYSICAL_VIEW_DISTANCE = 4;
         net.minecraft.network.packet.c2s.common.SyncedClientOptions def =
             net.minecraft.network.packet.c2s.common.SyncedClientOptions.createDefault();
         try {
