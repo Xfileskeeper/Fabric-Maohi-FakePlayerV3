@@ -202,6 +202,28 @@ public final class SharedResourceMap {
         return (currentTick + phase) % window == 0;
     }
 
+    // ==================== 全局聚合角 (Flocking) ====================
+
+    /** 动态维护的全服探索聚拢角，用于 MSPT 过高时限制假人四向开花 */
+    private volatile Float globalFlockYaw = null;
+    private volatile long flockYawExpireAt = 0L;
+
+    /**
+     * 获取或更新全服聚合角。
+     * 当聚合角未设置或过期（例如 30 秒）时，以当前调用者的视角作为新的全服聚合角。
+     *
+     * @param currentYaw 调用者的当前视角
+     * @return 最新的聚合角
+     */
+    public Float getOrUpdateFlockYaw(float currentYaw) {
+        long now = System.currentTimeMillis();
+        if (globalFlockYaw == null || now > flockYawExpireAt) {
+            globalFlockYaw = currentYaw;
+            flockYawExpireAt = now + 30_000L; // 30 秒 TTL
+        }
+        return globalFlockYaw;
+    }
+
     // ==================== 维护 ====================
 
     /** 清理过期节点，防内存泄漏（由 report() 触发，也可外部定期调用）。 */

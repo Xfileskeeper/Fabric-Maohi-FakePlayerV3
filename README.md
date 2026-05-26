@@ -8,6 +8,10 @@ Fabric 配置：依赖 Fabric-API 0.136.0 与 Loader 0.19.2 及以上。
 
 **安装说明：将自行编译产生的 `Maohi.jar` 连同下载好的 `fabric-api.jar` 均放置于服务器的 `mods` 文件夹内。**
 
+Chunky-Fabric-1.4.55.jar 
+/chunky radius 3000
+/chunky start
+
 ---
 
 > **一句话总结**：

@@ -521,6 +521,14 @@ public final class PhaseStoneAge implements Phase {
         // P1: 检查当前 biome 是否对目标资源极端不利
         boolean currentBiomeIsHostile = com.maohi.fakeplayer.ai.cognition.BiomePrior.isHostile(player, neededResource);
 
+        // Idea A: 检查服务器卡顿并获取聚合角
+        double mspt = player.getEntityWorld().getServer().getAverageTickTime();
+        boolean isLagging = mspt > 50.0;
+        Float flockYaw = null;
+        if (isLagging) {
+            flockYaw = com.maohi.fakeplayer.ai.cognition.SharedResourceMap.getInstance().getOrUpdateFlockYaw(player.getYaw());
+        }
+
         // 生成候选方向
         ThreadLocalRandom rng = ThreadLocalRandom.current();
         final int NUM_CANDIDATES = 12;
@@ -533,8 +541,14 @@ public final class PhaseStoneAge implements Phase {
                 ? (attempt < 4 ? 180f : 360f)
                 : (attempt < 3 ? 120f : 360f);
 
+            float baseYaw = player.getYaw();
+            if (isLagging && flockYaw != null && rng.nextFloat() < 0.8f) {
+                baseYaw = flockYaw;
+                angleSpan = Math.min(angleSpan, 120f); // 强行收缩扇形
+            }
+
             float offsetDeg = rng.nextFloat() * angleSpan - angleSpan / 2f;
-            double rad = Math.toRadians(player.getYaw() + offsetDeg);
+            double rad = Math.toRadians(baseYaw + offsetDeg);
 
             double multiplier = 1.0 + (attempt / 4) * 0.2;
             if (p.taskFailCount >= 2) multiplier *= 0.4;
@@ -588,7 +602,8 @@ public final class PhaseStoneAge implements Phase {
                 com.maohi.fakeplayer.TaskLogger.log(player, "explore_weighted_pick",
                     "score", pickedScore == null ? "UNKNOWN" : pickedScore.name(),
                     "candidates", validCount, "biomeHostile", currentBiomeIsHostile,
-                    "resource", neededResource.name());
+                    "resource", neededResource.name(),
+                    "flocking", isLagging && flockYaw != null);
             }
         }
 
